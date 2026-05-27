@@ -1,6 +1,8 @@
 import { Provider } from "@/provider";
 import { Espo } from "./espo";
 
+export * from "./types";
+
 export class EspoRpcProvider extends Espo {
   constructor(providerOrUrl: Provider | string) {
     const url =
