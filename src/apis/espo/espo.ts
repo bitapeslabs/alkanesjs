@@ -54,6 +54,10 @@ import {
   EspoGetAddressOutpointsOk,
   EspoGetAddressOutpointsRpcOk,
   EspoGetAddressOutpointsRpcResult,
+  EspoGetAddressSpendableOutpointsParams,
+  EspoGetAddressSpendableOutpoints,
+  EspoGetAddressSpendableOutpointsOk,
+  EspoGetAddressSpendableOutpointsResult,
   EspoGetCandlesParams,
   EspoGetCandles,
   EspoGetCandlesOk,
@@ -100,6 +104,11 @@ type GetHoldersOptions = Partial<Omit<EspoGetHoldersParams, "alkane">>;
 type GetAddressBalancesOptions = {
   include_outpoints?: boolean;
   includeOutpoints?: boolean;
+};
+
+type GetAddressSpendableOutpointsOptions = {
+  omit_raw_tx?: boolean;
+  omitRawTx?: boolean;
 };
 
 type GetCandlesOptions = Partial<Omit<EspoGetCandlesParams, "pool">>;
@@ -514,6 +523,22 @@ export class Espo {
     };
 
     return Ok<EspoGetAddressOutpoints, string>(normalized);
+  }
+
+  public getAddressSpendableOutpoints(
+    address: string,
+    options: GetAddressSpendableOutpointsOptions = {}
+  ): Promise<BoxedResponse<EspoGetAddressSpendableOutpoints, string>> {
+    const omitRawTx = options.omit_raw_tx ?? options.omitRawTx;
+    const params: EspoGetAddressSpendableOutpointsParams = {
+      address,
+      ...(omitRawTx !== undefined ? { omit_raw_tx: omitRawTx } : {}),
+    };
+
+    return this.callAndUnbox<
+      EspoGetAddressSpendableOutpointsOk,
+      EspoGetAddressSpendableOutpointsResult
+    >("essentials.get_address_spendable_outpoints", params);
   }
 
   public getCandles(

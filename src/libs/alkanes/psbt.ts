@@ -26,6 +26,7 @@ import type {
   AlkanesUtxoEntry,
   AlkaneId,
   IEsploraTransaction,
+  EspoSpendableOutpoint,
 } from "@/apis";
 import { borshSerialize } from "borsher";
 import {
@@ -431,9 +432,9 @@ export class ProtostoneTransaction {
   }
 
   //bindings to the provider's rpc methods
-  private get sandshrew_getFormattedUtxosForAddress() {
-    return this.transactionOptions.provider.rpc.sandshrew.sandshrew_getFormattedUtxosForAddress.bind(
-      this.transactionOptions.provider.rpc.sandshrew,
+  private get espo_getAddressSpendableOutpoints() {
+    return this.transactionOptions.provider.rpc.espo.getAddressSpendableOutpoints.bind(
+      this.transactionOptions.provider.rpc.espo,
     );
   }
 
@@ -447,14 +448,104 @@ export class ProtostoneTransaction {
     addInputDynamic(this.psbt, this.transactionOptions.provider.network, utxo);
   }
 
+  private formatEspoSpendableOutpoint(
+    address: string,
+    spendable: EspoSpendableOutpoint,
+  ): FormattedUtxo {
+    const [txId, outputIndexRaw] = spendable.outpoint.split(":");
+    const outputIndex = Number(outputIndexRaw);
+
+    if (!txId || !Number.isInteger(outputIndex)) {
+      throw new Error(`Invalid espo outpoint: ${spendable.outpoint}`);
+    }
+
+    if (!spendable.raw_tx_hex || spendable.raw_tx_hex === "0") {
+      throw new Error(
+        `Espo did not return raw tx hex for ${spendable.outpoint}`,
+      );
+    }
+
+    const prevTx = Transaction.fromHex(spendable.raw_tx_hex);
+    const status = {
+      confirmed: spendable.confirmations > 0,
+      ...(spendable.block_height != null
+        ? { block_height: spendable.block_height }
+        : {}),
+    };
+    const esploraTx = toEsploraTx(
+      prevTx,
+      status,
+      this.transactionOptions.provider.network,
+    );
+    const prevOut = esploraTx.vout[outputIndex];
+
+    if (!prevOut) {
+      throw new Error(`Espo raw tx is missing vout for ${spendable.outpoint}`);
+    }
+
+    const alkanes = (spendable.alkanes ?? []).reduce(
+      (acc, entry) => {
+        const existing = acc[entry.alkane]?.value ?? "0";
+        acc[entry.alkane] = {
+          id: entry.alkane,
+          name: "",
+          symbol: "",
+          value: (BigInt(existing) + BigInt(entry.amount)).toString(),
+        };
+
+        return acc;
+      },
+      {} as Record<string, AlkanesUtxoEntry>,
+    );
+
+    const runes = (spendable.runes ?? []).reduce(
+      (acc, entry) => {
+        acc[entry.rune] = {
+          amount: Number(entry.amount),
+          divisibility: 0,
+        };
+
+        return acc;
+      },
+      {} as FormattedUtxo["runes"],
+    );
+
+    return {
+      txId,
+      outputIndex,
+      satoshis: spendable.value,
+      address: prevOut.scriptpubkey_address || address,
+      scriptPk: spendable.script_pubkey_hex,
+      confirmations: spendable.confirmations,
+      indexed: spendable.confirmations > 0,
+      inscriptions: [],
+      runes,
+      alkanes,
+      prevTx: esploraTx,
+      prevTxHex: spendable.raw_tx_hex,
+    };
+  }
+
+  private async fetchSpendableUtxos(address: string): Promise<FormattedUtxo[]> {
+    const spendableOutpoints = consumeOrThrow(
+      await this.espo_getAddressSpendableOutpoints(address, {
+        omitRawTx: false,
+      }),
+    );
+
+    return spendableOutpoints.outpoints.map((outpoint) =>
+      this.formatEspoSpendableOutpoint(spendableOutpoints.address, outpoint),
+    );
+  }
+
   private async fetchResources(): Promise<void> {
     const removed = this.transactionOptions.availableUtxoTweak!.remove!;
     const notRemoved = (utxo: FormattedUtxo) =>
       !removed.has(`${utxo.txId}:${utxo.outputIndex}`);
 
     //BTC utxos come from the payment address
-    const paymentUtxos = consumeOrThrow(
-      await this.sandshrew_getFormattedUtxosForAddress(this.changeAddress),
+    const paymentUtxos = (
+      await this.fetchSpendableUtxos(this.changeAddress)
     ).filter(notRemoved);
     this.paymentUtxoIds = new Set(
       paymentUtxos.map((utxo) => `${utxo.txId}:${utxo.outputIndex}`),
@@ -464,9 +555,9 @@ export class ProtostoneTransaction {
     const assetUtxos =
       this.assetAddress === this.changeAddress
         ? []
-        : consumeOrThrow(
-            await this.sandshrew_getFormattedUtxosForAddress(this.assetAddress),
-          ).filter(notRemoved);
+        : (await this.fetchSpendableUtxos(this.assetAddress)).filter(
+            notRemoved,
+          );
 
     this.availableUtxos = [...paymentUtxos];
     assetUtxos.forEach((utxo) => {

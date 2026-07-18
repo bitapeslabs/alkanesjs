@@ -218,6 +218,48 @@ export type EspoGetAddressOutpointsRpcResult =
   | EspoGetAddressOutpointsRpcOk
   | EspoErrorResult;
 
+export interface EspoGetAddressSpendableOutpointsParams {
+  address: string;
+  omit_raw_tx?: boolean;
+}
+
+export interface EspoSpendableOutpointAlkane {
+  alkane: EspoAlkaneId;
+  amount: EspoAmountString;
+}
+
+export interface EspoSpendableOutpointRune {
+  id: string;
+  rune: string;
+  amount: EspoAmountString;
+}
+
+export interface EspoSpendableOutpoint {
+  outpoint: EspoOutpoint;
+  value: number;
+  script_pubkey_hex: string;
+  block_height: number | null;
+  confirmations: number;
+  coinbase: boolean;
+  alkanes: EspoSpendableOutpointAlkane[];
+  runes: EspoSpendableOutpointRune[];
+  raw_tx_hex: string;
+}
+
+export interface EspoGetAddressSpendableOutpointsOk extends EspoOkResult {
+  address: string;
+  height: number;
+  length: number;
+  outpoints: EspoSpendableOutpoint[];
+}
+export type EspoGetAddressSpendableOutpoints = DeepExpand<
+  UnwrapEspoResult<EspoGetAddressSpendableOutpointsOk>
+>;
+
+export type EspoGetAddressSpendableOutpointsResult =
+  | EspoGetAddressSpendableOutpointsOk
+  | EspoErrorResult;
+
 export type EspoEssentialsPingResult = "pong";
 
 /* -------------------------------------------------------------------------- */
@@ -511,6 +553,10 @@ export interface EspoRpcMethods {
   "essentials.get_address_outpoints": {
     params: EspoGetAddressOutpointsParams;
     result: EspoGetAddressOutpointsRpcResult;
+  };
+  "essentials.get_address_spendable_outpoints": {
+    params: EspoGetAddressSpendableOutpointsParams;
+    result: EspoGetAddressSpendableOutpointsResult;
   };
   "essentials.ping": {
     params?: Record<string, never>;
