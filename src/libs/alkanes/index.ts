@@ -11,6 +11,7 @@ import {
   getProtostoneTransactionsWithInscription,
   getProtostoneUnsignedPsbtBase64,
   SingularTransfer,
+  TransactionAddressInput,
 } from "./psbt";
 
 export enum AlkanesExecuteError {
@@ -38,7 +39,7 @@ export const execute = async ({
   signPsbt,
 }: {
   provider: Provider;
-  address: string;
+  address: TransactionAddressInput;
   callData: bigint[];
   signPsbt: (unsignedPsbtBase64: string) => Promise<string>;
   feeRate?: number;

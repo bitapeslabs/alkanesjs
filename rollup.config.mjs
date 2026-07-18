@@ -1,11 +1,13 @@
 import dts from "rollup-plugin-dts";
 
-export default {
-  input: "dist/index.d.ts",
+const flatten = (entry) => ({
+  input: `dist/${entry}.d.ts`,
   output: {
-    file: "dist/index.d.ts", // flattened output
+    file: `dist/${entry}.d.ts`, // flattened output
     format: "es",
   },
   plugins: [dts()],
-  preserveSymlinks: true, // <-- add this
-};
+  preserveSymlinks: true,
+});
+
+export default [flatten("index"), flatten("wallets")];

@@ -77,6 +77,28 @@ type IAvailableUtxoTweakOptions = {
   add: FormattedUtxo[];
 };
 
+/*
+  Wallets like OYL and Xverse expose two addresses: a payment address that holds
+  plain BTC and an asset (taproot/ordinals) address that holds alkanes. The
+  builder pulls alkanes UTXOs from assetAddress and BTC UTXOs from
+  paymentAddress. Passing a single string uses that address for both.
+*/
+export type TransactionAddresses = {
+  paymentAddress: string;
+  assetAddress: string;
+};
+
+export type TransactionAddressInput = string | TransactionAddresses;
+
+export function normalizeTransactionAddresses(
+  input: TransactionAddressInput,
+): TransactionAddresses {
+  if (typeof input === "string") {
+    return { paymentAddress: input, assetAddress: input };
+  }
+  return input;
+}
+
 export class AlkanesInscription<T> {
   constructor(
     public readonly shape: T,
@@ -102,11 +124,15 @@ export class ProtostoneTransactionWithInscription<T> {
     add: [],
   };
 
+  private readonly changeAddress: string;
+
   constructor(
-    private readonly changeAddress: string,
+    private readonly addressProvided: TransactionAddressInput,
     private readonly inscription: AlkanesInscription<T>,
     private readonly opts: ProtostoneTransactionOptions,
   ) {
+    this.changeAddress =
+      normalizeTransactionAddresses(addressProvided).paymentAddress;
     this.baseSigner = EcPair.makeRandom({
       network: this.opts.provider.network,
     });
@@ -133,7 +159,7 @@ export class ProtostoneTransactionWithInscription<T> {
           (this.opts.feeRate ?? this.opts.provider.defaultFeeRate),
       address: this.taprootAddress(),
     };
-    const guessBuilder = new ProtostoneTransaction(this.changeAddress, {
+    const guessBuilder = new ProtostoneTransaction(this.addressProvided, {
       ...this.opts,
       transfers: [commitTransfer],
       feeRate: this.baseFeeRate,
@@ -147,7 +173,7 @@ export class ProtostoneTransactionWithInscription<T> {
       input_length: 3,
     };
 
-    this.commitBuilder = new ProtostoneTransaction(this.changeAddress, {
+    this.commitBuilder = new ProtostoneTransaction(this.addressProvided, {
       ...this.opts,
       transfers: [commitTransfer],
       feeRate: this.baseFeeRate,
@@ -239,7 +265,7 @@ export class ProtostoneTransactionWithInscription<T> {
       ),
     };
 
-    let dry = await getDummyProtostoneTransaction(this.changeAddress, {
+    let dry = await getDummyProtostoneTransaction(this.addressProvided, {
       ...this.opts,
       includeInputs: [commitTxInputOption],
       availableUtxoTweak: this.utxoTweak,
@@ -250,7 +276,7 @@ export class ProtostoneTransactionWithInscription<T> {
     const witnessWeight = this.script.length * 1; // 1 weight unit per byte
     dry.data.feeOpts.vsize += Math.ceil(witnessWeight / 4);
 
-    this.revealBuilder = new ProtostoneTransaction(this.changeAddress, {
+    this.revealBuilder = new ProtostoneTransaction(this.addressProvided, {
       ...this.opts,
       includeInputs: [commitTxInputOption],
       availableUtxoTweak: this.utxoTweak,
@@ -362,19 +388,26 @@ export class ProtostoneTransaction {
   };
 
   private changeAddress: string;
+  private assetAddress: string;
+  //ids (txid:vout) of every available utxo that came from the payment address
+  private paymentUtxoIds = new Set<string>();
+  //set during fetchUtxos: true when any selected input came from the payment address
+  private pulledFromPaymentAddress = false;
   private cumulativeSpendRequirementBtc = 0;
   private cumulativeSpendRequirementAlkanes: Record<string, bigint> = {};
   private cumulativeValueInPsbts: number = 0;
 
   constructor(
-    private readonly addressProvided: string,
+    addressProvided: TransactionAddressInput,
     private readonly options: ProtostoneTransactionOptions,
   ) {
     this.psbt = new Psbt({
       network: options.provider.network,
       maximumFeeRate: 1_000_000_000,
     });
-    this.changeAddress = addressProvided;
+    const addresses = normalizeTransactionAddresses(addressProvided);
+    this.changeAddress = addresses.paymentAddress;
+    this.assetAddress = addresses.assetAddress;
 
     this.transactionOptions = {
       provider: options.provider,
@@ -415,14 +448,33 @@ export class ProtostoneTransaction {
   }
 
   private async fetchResources(): Promise<void> {
-    this.availableUtxos = consumeOrThrow(
+    const removed = this.transactionOptions.availableUtxoTweak!.remove!;
+    const notRemoved = (utxo: FormattedUtxo) =>
+      !removed.has(`${utxo.txId}:${utxo.outputIndex}`);
+
+    //BTC utxos come from the payment address
+    const paymentUtxos = consumeOrThrow(
       await this.sandshrew_getFormattedUtxosForAddress(this.changeAddress),
-    ).filter(
-      (utxo) =>
-        !this.transactionOptions.availableUtxoTweak?.remove!.has(
-          `${utxo.txId}:${utxo.outputIndex}`,
-        ),
+    ).filter(notRemoved);
+    this.paymentUtxoIds = new Set(
+      paymentUtxos.map((utxo) => `${utxo.txId}:${utxo.outputIndex}`),
     );
+
+    //alkanes utxos come from the asset address
+    const assetUtxos =
+      this.assetAddress === this.changeAddress
+        ? []
+        : consumeOrThrow(
+            await this.sandshrew_getFormattedUtxosForAddress(this.assetAddress),
+          ).filter(notRemoved);
+
+    this.availableUtxos = [...paymentUtxos];
+    assetUtxos.forEach((utxo) => {
+      const utxoId = `${utxo.txId}:${utxo.outputIndex}`;
+      if (!this.paymentUtxoIds.has(utxoId)) {
+        this.availableUtxos.push(utxo);
+      }
+    });
 
     this.transactionOptions.availableUtxoTweak!.add!.forEach((utxo) => {
       const utxoId = `${utxo.txId}:${utxo.outputIndex}`;
@@ -432,6 +484,8 @@ export class ProtostoneTransaction {
       ) {
         return; // already in available UTXOs
       }
+      //tweak-added utxos (eg commit change) are spendable as BTC
+      this.paymentUtxoIds.add(utxoId);
       this.availableUtxos.push(utxo);
     });
 
@@ -493,6 +547,22 @@ export class ProtostoneTransaction {
     return `${Number(alkaneId.block)}:${Number(alkaneId.tx)}`;
   }
 
+  private utxoId(utxo: FormattedUtxo): string {
+    return `${utxo.txId}:${utxo.outputIndex}`;
+  }
+
+  private isPaymentUtxo(utxo: FormattedUtxo): boolean {
+    return this.paymentUtxoIds.has(this.utxoId(utxo));
+  }
+
+  //In single-address mode every utxo is eligible to carry alkanes
+  private isAssetUtxo(utxo: FormattedUtxo): boolean {
+    if (this.assetAddress === this.changeAddress) {
+      return true;
+    }
+    return !this.isPaymentUtxo(utxo);
+  }
+
   private isUnlockedUtxo(utxo: FormattedUtxo): boolean {
     let isUnlocked =
       utxo.inscriptions.length === 0 && Object.keys(utxo.runes).length === 0;
@@ -528,6 +598,8 @@ export class ProtostoneTransaction {
       */
       const alkanesUtxoBalances = this.availableUtxos.filter(
         (utxo) =>
+          //alkanes are only ever pulled from the asset address
+          this.isAssetUtxo(utxo) &&
           `${utxo.alkanes?.[alkanes]?.id}` === alkanes &&
           //Check for ordinal inscriptions, runes and mezcals
           this.isUnlockedUtxo(utxo),
@@ -616,6 +688,10 @@ export class ProtostoneTransaction {
 
     for (const utxo of sortedUtxos) {
       const utxoId = `${utxo.txId}:${utxo.outputIndex}`;
+      //BTC is only ever pulled from the payment address
+      if (!this.isPaymentUtxo(utxo)) {
+        continue;
+      }
       if (!this.isUnlockedUtxo(utxo)) {
         continue;
       }
@@ -653,6 +729,22 @@ export class ProtostoneTransaction {
     }
     this.calcCumulativeSpendRequirements();
     this.utxos = this.getEsploraUtxosToMeetAllRequirements();
+    this.pulledFromPaymentAddress = this.utxos.some((utxo) =>
+      this.isPaymentUtxo(utxo),
+    );
+  }
+
+  /*
+    Any transaction that spends payment-address utxos must carry a protostone
+    and a dust output so stray alkanes riding on those utxos are captured by
+    the pointer/refund pointer instead of being burned. This overrides
+    excludeProtostone.
+  */
+  private shouldIncludeProtostone(): boolean {
+    if (this.pulledFromPaymentAddress) {
+      return true;
+    }
+    return !this.transactionOptions.excludeProtostone;
   }
 
   private async initialize(): Promise<void> {
@@ -693,6 +785,7 @@ export class ProtostoneTransaction {
 
   private addOutputs(btcOutputs: Record<string, number>): boolean {
     let hasChange = false;
+    const includeAlkanesPointerOutput = this.shouldIncludeProtostone();
 
     const totalOutputValue = Object.values(btcOutputs).reduce(
       (acc, amount) => acc + amount,
@@ -709,14 +802,17 @@ export class ProtostoneTransaction {
         totalOutputValue -
         this.fee -
         this.cumulativeValueInPsbts -
-        this.MINIMUM_PROTOCOL_DUST,
+        (includeAlkanesPointerOutput ? this.MINIMUM_PROTOCOL_DUST : 0),
     );
 
-    //Change output to catch all incoming alkanes
-    this.psbt.addOutput({
-      address: this.changeAddress,
-      value: this.MINIMUM_PROTOCOL_DUST,
-    });
+    //Dust output on the asset address to catch all incoming alkanes via the
+    //protostone pointer/refund pointer
+    if (includeAlkanesPointerOutput) {
+      this.psbt.addOutput({
+        address: this.assetAddress,
+        value: this.MINIMUM_PROTOCOL_DUST,
+      });
+    }
 
     //Outputs for edicts and transfers
     for (const [address, amount] of Object.entries(btcOutputs)) {
@@ -819,17 +915,21 @@ export class ProtostoneTransaction {
   }
 
   private addProtostoneData(edicts?: IEdict[]): Buffer | undefined {
-    if (this.transactionOptions.excludeProtostone) {
+    if (!this.shouldIncludeProtostone()) {
       return undefined;
     }
+
+    //The alkanes dust output sits right after any appended psbt outputs
+    const alkanesPointerOutputIndex =
+      this.transactionOptions.includePsbts!.length;
 
     const protostoneBuffer = encodeRunestoneProtostone({
       protostones: [
         ProtoStone.message({
           protocolTag: 1n,
           edicts: edicts,
-          pointer: 0,
-          refundPointer: 0,
+          pointer: alkanesPointerOutputIndex,
+          refundPointer: alkanesPointerOutputIndex,
           calldata: encipher(this.transactionOptions.callData ?? []),
         }),
       ],
@@ -951,7 +1051,7 @@ type IProtostoneTransactionDryRunResponse = {
 };
 
 export async function getDummyProtostoneTransaction(
-  addressProvided: string,
+  addressProvided: TransactionAddressInput,
   options: ProtostoneTransactionOptions,
 ): Promise<BoxedResponse<IProtostoneTransactionDryRunResponse, string>> {
   try {
@@ -997,7 +1097,7 @@ export async function getDummyProtostoneTransaction(
 
 //[transaction, useMaraPool] = getProtostoneTransaction(address, options)
 export async function getProtostoneUnsignedPsbtBase64(
-  addressProvided: string,
+  addressProvided: TransactionAddressInput,
   options: Omit<ProtostoneTransactionOptions, "psbtTransfers">,
 ): Promise<
   BoxedResponse<
@@ -1041,7 +1141,7 @@ export async function getProtostoneUnsignedPsbtBase64(
 }
 
 export async function getProtostoneTransactionsWithInscription<T>(
-  addressProvided: string,
+  addressProvided: TransactionAddressInput,
   inscription: AlkanesInscription<T>,
   signPsbt: (unisignedPsbtBase64: string) => Promise<string>,
   options: Omit<ProtostoneTransactionOptions, "psbtTransfers">,
