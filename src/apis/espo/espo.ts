@@ -74,6 +74,9 @@ import {
   EspoGetPoolsResult,
   EspoGetPoolsRpcOk,
   EspoGetPoolsRpcResult,
+  EspoGetSubfrostSignerOk,
+  EspoGetSubfrostSignerResult,
+  EspoGetSubfrostSigner,
   EspoFindBestSwapPathParams,
   EspoFindBestSwapPath,
   EspoFindBestSwapPathOk,
@@ -590,6 +593,20 @@ export class Espo {
     };
 
     return Ok<EspoGetTrades, string>(normalized);
+  }
+
+  /**
+   * subfrost.get_signer: the frBTC signer read from the indexed `/signer`
+   * storage slot of alkane 32:0. A pure data read against espo's index, NOT a
+   * contract simulation, so it works on every espo endpoint.
+   */
+  public async getSubfrostSigner(): Promise<
+    BoxedResponse<EspoGetSubfrostSigner, string>
+  > {
+    return this.callAndUnbox<
+      EspoGetSubfrostSignerOk,
+      EspoGetSubfrostSignerResult
+    >("subfrost.get_signer", {});
   }
 
   public async getPools(

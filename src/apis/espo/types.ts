@@ -592,6 +592,27 @@ type Keys = readonly PropertyKey[];
 
 export type Strip<T, K extends Keys> = Omit<T, Extract<K[number], keyof T>>;
 // convenience aliases for your two cases
+/* -------------------------------------------------------------------------- */
+/* Subfrost module                                                            */
+/* -------------------------------------------------------------------------- */
+
+export interface EspoGetSubfrostSignerOk extends EspoOkResult {
+  /** The alkane whose storage holds the signer (frBTC, "32:0"). */
+  alkane: EspoAlkaneId;
+  storage_key: string;
+  /** 0x-prefixed P2TR script_pubkey hex. */
+  script_pubkey: string;
+  address: string;
+}
+
+export type EspoGetSubfrostSignerResult =
+  | EspoGetSubfrostSignerOk
+  | EspoErrorResult;
+
+export type EspoGetSubfrostSigner = DeepExpand<
+  UnwrapEspoResult<EspoGetSubfrostSignerOk>
+>;
+
 export type UnwrapEspoResult<T> = Strip<T, ["ok", "error", "hint"]>;
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;

@@ -36,7 +36,12 @@ import {
   isBoxedError,
 } from "@/boxed";
 import chalk, { colors } from "chalk";
-import { addInputDynamic, trimUndefined, tweakSigner } from "./utils";
+import {
+  addInputDynamic,
+  buildPsbtInput,
+  trimUndefined,
+  tweakSigner,
+} from "./utils";
 import { Provider } from "@/provider";
 import {
   encipher,
@@ -50,6 +55,12 @@ import { u128, u32 } from "@magiceden-oss/runestone-lib/dist/src/integer";
 import { BorshSchema } from "borsher";
 import { EcPair } from "./utils";
 import { Expand } from "@/utils";
+import {
+  MIN_RELAY_FEE_RATE,
+  computeCpfpChildFee,
+  type CpfpFeeInputs,
+  type CpfpFeeResult,
+} from "./cpfp-fee";
 
 export type PsbtInputExtended = Expand<Parameters<Psbt["addInput"]>[0]>;
 
@@ -99,6 +110,85 @@ export function normalizeTransactionAddresses(
   }
   return input;
 }
+
+/*
+  ────────────────────────────  MULTI-PROTOSTONE  ────────────────────────────
+
+  Some alkanes operations need TWO OR MORE protostones in a single tx:
+
+  - AMM swap ("shifter"): the runtime auto-allocates every alkane sitting on
+    the spent utxos into the FIRST matching protostone, which would hand the
+    AMM factory all of your unrelated sibling tokens. The fix is
+    protostone[0] = an edict-only stone that moves exactly the sell amount
+    into protostone[1]'s shadow vout, pointing its own leftovers at change;
+    protostone[1] = the message (cellpack), pointing at the receive output.
+
+  - frBTC unwrap: the contract REJECTS a protomessage carrying edicts
+    ("message cannot contain edicts, only a pointer"), so the frBTC has to
+    arrive from a preceding edict-only protostone aimed at the message's
+    shadow vout.
+*/
+
+/**
+ * Where a pointer / edict sends its alkanes.
+ *
+ * - `number` — a literal output index in the final transaction.
+ * - `{ protostone: n }` — the SHADOW VOUT of protostone `n` in this same
+ *   transaction. Alkanes routed here land in that protostone's incoming
+ *   sheet instead of paying a real output. Per the protorune convention,
+ *   protostone `i` occupies vout `tx.output.length + 1 + i`, where
+ *   `tx.output.length` counts the OP_RETURN that carries the runestone.
+ *   Use this sentinel rather than a raw number: outputs are built inside
+ *   `build()`, so callers cannot know the output count up front.
+ * - `{ output: "pointer" }` — the dust output the builder always creates on
+ *   the asset address to collect alkanes (the "receive" output).
+ * - `{ output: "change" }` — the BTC change output. Falls back to the dust
+ *   pointer output when the transaction ends up with no change.
+ */
+export type ProtostoneOutputRef =
+  | number
+  | { protostone: number }
+  | { output: "pointer" | "change" };
+
+/** `{ protostone: index }` — routes into protostone `index`'s shadow vout. */
+export const toProtostone = (index: number): ProtostoneOutputRef => ({
+  protostone: index,
+});
+
+/** The dust output on the asset address that collects incoming alkanes. */
+export const POINTER_OUTPUT: ProtostoneOutputRef = { output: "pointer" };
+
+/** The BTC change output (falls back to POINTER_OUTPUT when there is none). */
+export const CHANGE_OUTPUT: ProtostoneOutputRef = { output: "change" };
+
+/**
+ * Resolve protostone `protostoneIndex` to its shadow vout.
+ * `outputCount` is `tx.output.length`, i.e. INCLUDING the OP_RETURN.
+ */
+export function shadowVout(
+  outputCount: number,
+  protostoneIndex: number,
+): number {
+  return outputCount + 1 + protostoneIndex;
+}
+
+export type ProtostoneEdictSpec = {
+  id: { block: bigint; tx: bigint };
+  amount: bigint;
+  output: ProtostoneOutputRef;
+};
+
+/**
+ * One protostone in an explicit `protostones` array. When `calldata` is
+ * omitted or empty the stone carries no message tag (an edict-only stone);
+ * it still emits its pointer/refund tags when those are supplied.
+ */
+export type ProtostoneSpec = {
+  edicts?: ProtostoneEdictSpec[];
+  pointer?: ProtostoneOutputRef;
+  refundPointer?: ProtostoneOutputRef;
+  calldata?: bigint[];
+};
 
 export class AlkanesInscription<T> {
   constructor(
@@ -352,12 +442,35 @@ export class ProtostoneTransaction {
 
     callData?: bigint[]; // Call data to be included in the Protostone
 
+    /*
+      Explicit multi-protostone construction. When supplied this REPLACES the
+      default single-protostone build entirely: `callData` and the edicts
+      derived from `transfers` are no longer written into the runestone, so
+      the caller owns every edict and pointer. `transfers` still drives BTC
+      outputs and utxo selection. Leave undefined for the default behaviour.
+    */
+    protostones?: ProtostoneSpec[];
+
     ignoreAlkanesUtxoCheck?: boolean; // If true, it will not check if the alkanes UTXOs are sufficient
 
     //If etching or mint are included, a new output will be created to collect the alkanes
     transfers: SingularTransfer[];
     feeOpts?: IFeeOpts;
     feeRate?: number;
+
+    /*
+      Pin the fee to an exact absolute amount (sats), bypassing feeRate * vsize.
+      Used by CPFP packages, where the child must pay a precise deficit so the
+      PACKAGE hits the target rate.
+    */
+    absoluteFee?: number;
+
+    /*
+      Override the 500 sat fee floor. A CPFP parent deliberately pays close to
+      the relay minimum, which is well under the default floor, so it must be
+      lowered (or set to 0) for the package arithmetic to hold.
+    */
+    minimumFee?: number;
     //signPsbt: LaserEyesClient["signPsbt"]; transaction is unfinalized
     availableUtxoTweak?: IAvailableUtxoTweakOptions;
 
@@ -428,6 +541,11 @@ export class ProtostoneTransaction {
       transfers: options.transfers ?? [],
       callData: options.callData ?? [],
       excludeProtostone: options.excludeProtostone ?? false,
+      //left undefined when absent so the default single-protostone path is
+      //bit-for-bit what it always was
+      protostones: options.protostones,
+      absoluteFee: options.absoluteFee,
+      minimumFee: options.minimumFee,
     };
   }
 
@@ -575,8 +693,16 @@ export class ProtostoneTransaction {
       ) {
         return; // already in available UTXOs
       }
-      //tweak-added utxos (eg commit change) are spendable as BTC
-      this.paymentUtxoIds.add(utxoId);
+      /*
+        Tweak-added utxos (eg commit change, or a CPFP parent's outputs) are
+        spendable as BTC — UNLESS they carry alkanes. An alkane-bearing utxo is
+        never eligible for BTC coin selection anyway, and tagging it as a
+        payment utxo would make `isAssetUtxo` reject it in two-address mode,
+        hiding the alkanes a still-unbroadcast parent just produced.
+      */
+      if (Object.keys(utxo.alkanes ?? {}).length === 0) {
+        this.paymentUtxoIds.add(utxoId);
+      }
       this.availableUtxos.push(utxo);
     });
 
@@ -589,6 +715,20 @@ export class ProtostoneTransaction {
   }
 
   private async calculateFee(): Promise<void> {
+    // A caller-supplied floor wins over the built-in one; 0 is a valid floor
+    // (a CPFP parent pays near the relay minimum, far below the 500 default).
+    const minimumFee =
+      this.transactionOptions.minimumFee ?? this.MINIMUM_FEE;
+
+    // An explicit absolute fee skips rate * vsize entirely.
+    if (this.transactionOptions.absoluteFee !== undefined) {
+      this.fee = Math.max(
+        Math.ceil(this.transactionOptions.absoluteFee),
+        minimumFee,
+      );
+      return;
+    }
+
     let feeRate = this.transactionOptions.feeRate;
     if (!feeRate) {
       const feeResp = this.transactionOptions.feeOpts
@@ -603,7 +743,7 @@ export class ProtostoneTransaction {
           (this.transactionOptions.feeOpts?.input_length ?? 0) * 2,
       ) * feeRate;
 
-    this.fee = Math.max(baseFee, this.MINIMUM_FEE);
+    this.fee = Math.max(Math.ceil(baseFee), minimumFee);
   }
 
   private calcCumulativeSpendRequirements() {
@@ -709,10 +849,26 @@ export class ProtostoneTransaction {
         a.satoshis < b.satoshis ? -1 : a.satoshis > b.satoshis ? 1 : 0,
       );
 
-      let accumulated = 0n;
+      /*
+        Forced inputs (includeInputs, e.g. a pinned CPFP parent output) already
+        deliver their alkanes, so selection only needs to cover the remainder —
+        and must not re-select the forced outpoints.
+      */
+      const forcedInputs = this.transactionOptions.includeInputs ?? [];
+      const forcedIds = new Set(
+        forcedInputs.map((i) => this.utxoId(i.input_formatted)),
+      );
+      let accumulated = forcedInputs.reduce(
+        (acc, i) =>
+          acc + BigInt(i.input_formatted.alkanes?.[alkanes]?.value ?? 0),
+        0n,
+      );
       for (const utxo of sortedAlkanesUtxoBalances) {
         if (accumulated >= this.cumulativeSpendRequirementAlkanes[alkanes]) {
           break;
+        }
+        if (forcedIds.has(this.utxoId(utxo))) {
+          continue;
         }
 
         accumulated += BigInt(utxo.alkanes[alkanes].value);
@@ -826,16 +982,38 @@ export class ProtostoneTransaction {
   }
 
   /*
-    Any transaction that spends payment-address utxos must carry a protostone
-    and a dust output so stray alkanes riding on those utxos are captured by
-    the pointer/refund pointer instead of being burned. This overrides
-    excludeProtostone.
+    A protostone (and its dust pointer output) is only needed when the tx
+    actually carries alkane data: either alkanes ride on the selected inputs
+    (a pointer must capture them instead of letting them burn), or we're
+    writing a message (a contract call). A pure BTC transfer with neither is a
+    plain payment and gets no protostone and no dust output.
   */
   private shouldIncludeProtostone(): boolean {
-    if (this.pulledFromPaymentAddress) {
-      return true;
+    if (this.transactionOptions.excludeProtostone) {
+      return false;
     }
-    return !this.transactionOptions.excludeProtostone;
+    return (
+      this.hasCustomProtostones() ||
+      this.hasAlkanesInInputs() ||
+      this.hasProtostoneMessage()
+    );
+  }
+
+  /** True when the caller supplied an explicit `protostones` array. */
+  private hasCustomProtostones(): boolean {
+    return (this.transactionOptions.protostones?.length ?? 0) > 0;
+  }
+
+  /** True when any selected input utxo carries an alkane balance. */
+  private hasAlkanesInInputs(): boolean {
+    return this.utxos.some(
+      (utxo) => Object.keys(utxo.alkanes ?? {}).length > 0,
+    );
+  }
+
+  /** True when we're writing a message (a contract call) into the protostone. */
+  private hasProtostoneMessage(): boolean {
+    return (this.transactionOptions.callData?.length ?? 0) > 0;
   }
 
   private async initialize(): Promise<void> {
@@ -1005,7 +1183,87 @@ export class ProtostoneTransaction {
     return transactionEdicts;
   }
 
-  private addProtostoneData(edicts?: IEdict[]): Buffer | undefined {
+  private resolveOutputRef(
+    ref: ProtostoneOutputRef,
+    ctx: {
+      realOutputCount: number;
+      pointerOutputIndex: number;
+      changeOutputIndex: number;
+    },
+  ): number {
+    if (typeof ref === "number") {
+      return ref;
+    }
+    if ("protostone" in ref) {
+      /*
+        The OP_RETURN has not been appended yet, so the FINAL output count is
+        the current one plus one. Protostone i then sits at
+        tx.output.length + 1 + i.
+      */
+      return shadowVout(ctx.realOutputCount + 1, ref.protostone);
+    }
+    return ref.output === "change"
+      ? ctx.changeOutputIndex
+      : ctx.pointerOutputIndex;
+  }
+
+  private buildCustomProtostones(hasChange: boolean): ProtoStone[] {
+    const specs = this.transactionOptions.protostones!;
+
+    //outputs currently on the psbt, i.e. everything except the OP_RETURN
+    const realOutputCount = this.psbt.txOutputs.length;
+    //the alkanes dust output sits right after any appended psbt outputs
+    const pointerOutputIndex = this.transactionOptions.includePsbts!.length;
+    //change, when present, is always the last output added before the OP_RETURN
+    const changeOutputIndex = hasChange
+      ? realOutputCount - 1
+      : pointerOutputIndex;
+
+    const ctx = { realOutputCount, pointerOutputIndex, changeOutputIndex };
+
+    return specs.map((spec) => {
+      const edicts: IEdict[] = (spec.edicts ?? []).map((edict) => ({
+        id: new ProtoruneRuneId(u128(edict.id.block), u128(edict.id.tx)),
+        amount: u128(edict.amount),
+        output: u32(this.resolveOutputRef(edict.output, ctx)),
+      }));
+
+      const hasCalldata = (spec.calldata?.length ?? 0) > 0;
+      const hasPointer =
+        spec.pointer !== undefined || spec.refundPointer !== undefined;
+
+      //no message and no pointer at all: a bare edict-only stone
+      if (!hasCalldata && !hasPointer) {
+        return ProtoStone.edicts({ protocolTag: 1n, edicts });
+      }
+
+      const pointer = this.resolveOutputRef(spec.pointer ?? POINTER_OUTPUT, ctx);
+      const refundPointer = this.resolveOutputRef(
+        spec.refundPointer ?? spec.pointer ?? POINTER_OUTPUT,
+        ctx,
+      );
+
+      /*
+        An empty calldata emits the POINTER/REFUND tags but NO message tag, so
+        this is still an edict-only stone as far as the runtime is concerned.
+        That is exactly what a shifter's protostone[0] wants (edicts plus a
+        pointer at change) and what a contract rejecting "message with edicts"
+        requires of the stone feeding it.
+      */
+      return ProtoStone.message({
+        protocolTag: 1n,
+        edicts,
+        pointer,
+        refundPointer,
+        calldata: encipher(spec.calldata ?? []),
+      });
+    });
+  }
+
+  private addProtostoneData(
+    edicts?: IEdict[],
+    hasChange: boolean = false,
+  ): Buffer | undefined {
     if (!this.shouldIncludeProtostone()) {
       return undefined;
     }
@@ -1014,16 +1272,20 @@ export class ProtostoneTransaction {
     const alkanesPointerOutputIndex =
       this.transactionOptions.includePsbts!.length;
 
+    const protostones = this.hasCustomProtostones()
+      ? this.buildCustomProtostones(hasChange)
+      : [
+          ProtoStone.message({
+            protocolTag: 1n,
+            edicts: edicts,
+            pointer: alkanesPointerOutputIndex,
+            refundPointer: alkanesPointerOutputIndex,
+            calldata: encipher(this.transactionOptions.callData ?? []),
+          }),
+        ];
+
     const protostoneBuffer = encodeRunestoneProtostone({
-      protostones: [
-        ProtoStone.message({
-          protocolTag: 1n,
-          edicts: edicts,
-          pointer: alkanesPointerOutputIndex,
-          refundPointer: alkanesPointerOutputIndex,
-          calldata: encipher(this.transactionOptions.callData ?? []),
-        }),
-      ],
+      protostones,
     }).encodedRunestone;
 
     this.psbt.addOutput({ script: protostoneBuffer, value: 0 });
@@ -1097,7 +1359,7 @@ export class ProtostoneTransaction {
     const hasChange = this.addOutputs(btcOutputs);
 
     const edicts = this.createEdicts(btcOutputs, hasChange);
-    let protostone = this.addProtostoneData(edicts);
+    let protostone = this.addProtostoneData(edicts, hasChange);
 
     //If we have a alkanestone, we need to add a second output for the opreturn. Otherwise just one for the change
     return [this.utxos.length + (protostone ? 2 : 1), protostone];
@@ -1229,6 +1491,357 @@ export async function getProtostoneUnsignedPsbtBase64(
     vsize,
     fee: alkanestoneTx.fee,
   });
+}
+
+/*
+  ──────────────────────────────────  CPFP  ──────────────────────────────────
+*/
+
+export {
+  MIN_RELAY_FEE_RATE,
+  computeCpfpChildFee,
+  type CpfpFeeInputs,
+  type CpfpFeeResult,
+};
+
+/** Sum the input values of an unsigned psbt (witness or legacy). */
+function sumPsbtInputValues(psbt: Psbt): number {
+  return psbt.data.inputs.reduce((acc, input, index) => {
+    if (input.witnessUtxo) {
+      return acc + input.witnessUtxo.value;
+    }
+    if (input.nonWitnessUtxo) {
+      const prev = Transaction.fromBuffer(input.nonWitnessUtxo);
+      return acc + prev.outs[psbt.txInputs[index].index].value;
+    }
+    throw new Error(`PSBT input ${index} carries no utxo information`);
+  }, 0);
+}
+
+const sumTxOutputValues = (tx: Transaction): number =>
+  tx.outs.reduce((acc, out) => acc + out.value, 0);
+
+export type CpfpPackageResult = {
+  parentHex: string;
+  childHex: string;
+  parentTxid: string;
+  childTxid: string;
+  parentFee: number;
+  childFee: number;
+  parentVsize: number;
+  childVsize: number;
+  /** the rate the package actually achieves, sat/vB */
+  packageFeeRate: number;
+};
+
+export type CpfpPackageParams = {
+  provider: Provider;
+  /** built first, pays ~the relay floor */
+  parent: Omit<ProtostoneTransactionOptions, "provider" | "psbtTransfers">;
+  /** built second, spends a parent output and pays the package deficit */
+  child: Omit<ProtostoneTransactionOptions, "provider" | "psbtTransfers">;
+  /** the rate the whole package should achieve (sat/vB) */
+  packageFeeRate: number;
+  /** parent rate; defaults to MIN_RELAY_FEE_RATE */
+  parentFeeRate?: number;
+  /*
+    Alkane balances the PARENT's outputs will carry once it is indexed. The
+    parent is not broadcast yet, so espo cannot know about them and
+    `toFormattedUtxo` would hand the child a bare BTC utxo — leaving the child
+    unable to select the alkanes the parent just produced (a wrap's minted
+    frBTC, a swap's bought token, …). Keyed by parent output index; the inner
+    record is keyed "block:tx", matching `FormattedUtxo["alkanes"]`.
+  */
+  parentOutputAlkanes?: Record<number, Record<string, AlkanesUtxoEntry>>;
+};
+
+/**
+ * Build and sign a 2-transaction CPFP package. The child spends an output of
+ * the still-unbroadcast parent, and pays enough that the PACKAGE hits
+ * `packageFeeRate`. Broadcast parent first, then child (or submit as a
+ * package).
+ */
+export async function getCpfpPackageTransactions(
+  addressProvided: TransactionAddressInput,
+  params: CpfpPackageParams,
+  signPsbt: (unsignedPsbtBase64: string) => Promise<string>,
+): Promise<BoxedResponse<CpfpPackageResult, string>> {
+  try {
+    const { provider, packageFeeRate } = params;
+    const parentFeeRate = params.parentFeeRate ?? MIN_RELAY_FEE_RATE;
+    const changeAddress =
+      normalizeTransactionAddresses(addressProvided).paymentAddress;
+
+    /* 1. parent, at the relay floor, with the 500 sat floor disabled */
+    const parentOptions: ProtostoneTransactionOptions = {
+      ...params.parent,
+      provider,
+      feeRate: parentFeeRate,
+      minimumFee: params.parent.minimumFee ?? 0,
+    };
+
+    const parentBuild = await getProtostoneUnsignedPsbtBase64(
+      addressProvided,
+      parentOptions,
+    );
+    if (isBoxedError(parentBuild)) {
+      return parentBuild;
+    }
+
+    const parentInputValue = sumPsbtInputValues(
+      Psbt.fromBase64(parentBuild.data.psbtBase64, {
+        network: provider.network,
+      }),
+    );
+
+    const parentHex = await signPsbt(parentBuild.data.psbtBase64);
+    const parentTx = Transaction.fromHex(parentHex);
+    const parentTxid = parentTx.getId();
+    const parentVsize = parentTx.virtualSize();
+    const parentFee = parentInputValue - sumTxOutputValues(parentTx);
+
+    if (parentFee <= 0) {
+      return new BoxedError(
+        "TransactionError",
+        `CPFP parent has a non-positive fee (${parentFee} sats)`,
+      );
+    }
+
+    /*
+      2. chain the child onto the unconfirmed parent, exactly like
+      ProtostoneTransactionWithInscription.finalizeCommit: drop every outpoint
+      the parent spends (espo still reports them as spendable, the parent is
+      not broadcast yet) and offer the parent's own outputs as available utxos.
+    */
+    const parentEsploraTx = toEsploraTx(
+      parentTx,
+      { confirmed: false },
+      provider.network,
+    );
+
+    const utxoTweak: IAvailableUtxoTweakOptions = {
+      remove: new Set(params.child.availableUtxoTweak?.remove ?? []),
+      add: [...(params.child.availableUtxoTweak?.add ?? [])],
+    };
+
+    parentEsploraTx.vin.forEach((input) => {
+      utxoTweak.remove.add(`${input.txid}:${input.vout}`);
+    });
+
+    /*
+      Only outputs paying a script THIS wallet controls may enter the child's
+      spendable set. A parent can pay third parties — a wrap pays `amountIn`
+      sats to the frBTC signer — and blanket-adding those would let BTC coin
+      selection (largest-first) pick an unsignable input and sink the build.
+    */
+    const assetAddress =
+      normalizeTransactionAddresses(addressProvided).assetAddress;
+    const ownedScripts = new Map<string, string>();
+    for (const owned of new Set([changeAddress, assetAddress])) {
+      ownedScripts.set(
+        address.toOutputScript(owned, provider.network).toString("hex"),
+        owned,
+      );
+    }
+
+    /*
+      The alkane-carrying parent output (a wrap's minted frBTC, a swap's bought
+      token) is PINNED as a forced child input: it both guarantees the child
+      actually spends the parent (a package that isn't linked isn't a package)
+      and delivers the parent's alkanes without racing pre-existing wallet
+      utxos in selection. A parent with no alkane outputs pins its largest
+      owned output instead, for the linkage alone.
+    */
+    const pinnedInputs: IncludeInputOption[] = [
+      ...(params.child.includeInputs ?? []),
+    ];
+    const pinnedIds = new Set(
+      pinnedInputs.map(
+        (i) => `${i.input_formatted.txId}:${i.input_formatted.outputIndex}`,
+      ),
+    );
+    let pinnedAlkaneOutput = false;
+    let largestOwned: FormattedUtxo | undefined;
+
+    parentTx.outs.forEach((out, index) => {
+      //skip the 0-value OP_RETURN, it is not spendable
+      if (out.value <= 0) return;
+      const ownerAddress = ownedScripts.get(
+        Buffer.from(out.script).toString("hex"),
+      );
+      if (!ownerAddress) return;
+      const utxo = toFormattedUtxo(
+        parentEsploraTx,
+        parentHex,
+        ownerAddress,
+        index,
+      );
+      const alkanes = params.parentOutputAlkanes?.[index];
+      if (alkanes) {
+        utxo.alkanes = { ...alkanes };
+      }
+      utxoTweak.add.push(utxo);
+
+      const utxoId = `${utxo.txId}:${utxo.outputIndex}`;
+      if (alkanes && !pinnedIds.has(utxoId)) {
+        pinnedInputs.push({
+          input_extended: buildPsbtInput(provider.network, utxo),
+          input_formatted: utxo,
+        });
+        pinnedIds.add(utxoId);
+        pinnedAlkaneOutput = true;
+      }
+      if (
+        !alkanes &&
+        (!largestOwned || utxo.satoshis > largestOwned.satoshis)
+      ) {
+        largestOwned = utxo;
+      }
+    });
+
+    if (!pinnedAlkaneOutput) {
+      if (largestOwned) {
+        const utxoId = `${largestOwned.txId}:${largestOwned.outputIndex}`;
+        if (!pinnedIds.has(utxoId)) {
+          pinnedInputs.push({
+            input_extended: buildPsbtInput(provider.network, largestOwned),
+            input_formatted: largestOwned,
+          });
+        }
+      } else {
+        return new BoxedError(
+          "TransactionError",
+          "No CPFP parent output is spendable by this wallet; the child cannot be linked to the parent",
+        );
+      }
+    }
+
+    const childOptions: ProtostoneTransactionOptions = {
+      ...params.child,
+      provider,
+      availableUtxoTweak: utxoTweak,
+      includeInputs: pinnedInputs,
+      feeRate: params.child.feeRate ?? packageFeeRate,
+    };
+
+    /*
+      3. size the child at its REAL fee. The dry vsize depends on coin
+      selection, and selection depends on the fee (a larger fee can pull in
+      inputs the first dry never saw, growing the vsize and the fee again), so
+      iterate dummy builds to a fixed point: selection is deterministic, so
+      once a build AT the target fee needs no more than that fee, the real
+      build selects the same inputs and its signed vsize is bounded by the
+      dummy's (dummy sigs are worst-case sized).
+    */
+    const dry = await getDummyProtostoneTransaction(
+      addressProvided,
+      childOptions,
+    );
+    if (isBoxedError(dry)) {
+      return dry;
+    }
+
+    let feeOpts = dry.data.feeOpts;
+    let targetChildFee = computeCpfpChildFee({
+      parentFee,
+      parentVsize,
+      childVsize: feeOpts.vsize,
+      packageFeeRate,
+    }).childFee;
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const redry = await getDummyProtostoneTransaction(addressProvided, {
+        ...childOptions,
+        feeOpts,
+        absoluteFee: targetChildFee,
+        minimumFee: params.child.minimumFee ?? 0,
+      });
+      if (isBoxedError(redry)) {
+        return redry;
+      }
+      feeOpts = redry.data.feeOpts;
+      const nextFee = computeCpfpChildFee({
+        parentFee,
+        parentVsize,
+        childVsize: feeOpts.vsize,
+        packageFeeRate,
+      }).childFee;
+      if (nextFee <= targetChildFee) {
+        //the selection at targetChildFee needs no more than targetChildFee;
+        //keep the larger figure so the package can only overshoot the target
+        break;
+      }
+      targetChildFee = nextFee;
+    }
+
+    /* 4. rebuild the child pinned to that exact fee, then sign it */
+    const childBuilder = new ProtostoneTransaction(addressProvided, {
+      ...childOptions,
+      feeOpts,
+      absoluteFee: targetChildFee,
+      minimumFee: params.child.minimumFee ?? 0,
+    });
+    await childBuilder.build();
+
+    const childPsbtBase64 = childBuilder.extractPsbtBase64();
+    const childInputValue = sumPsbtInputValues(
+      Psbt.fromBase64(childPsbtBase64, { network: provider.network }),
+    );
+
+    const childHex = await signPsbt(childPsbtBase64);
+    const childTx = Transaction.fromHex(childHex);
+    const childVsize = childTx.virtualSize();
+    const childFee = childInputValue - sumTxOutputValues(childTx);
+
+    /*
+      A child that did not actually spend the parent is not a package at all,
+      it is just two independent transactions. The pinned includeInputs above
+      make this structurally impossible; the guard stays as a tripwire.
+    */
+    const spendsParent = childTx.ins.some(
+      (input) =>
+        Buffer.from(input.hash).reverse().toString("hex") === parentTxid,
+    );
+    if (!spendsParent) {
+      return new BoxedError(
+        "TransactionError",
+        "CPFP child does not spend any output of the parent; the package would not be a package",
+      );
+    }
+
+    /*
+      Safety net for the fixed-point loop above: a package under the requested
+      rate may never confirm in exactly the congestion the user paid to beat,
+      so refuse to return one (the epsilon absorbs float noise).
+    */
+    const achievedRate = (parentFee + childFee) / (parentVsize + childVsize);
+    if (achievedRate + 1e-6 < packageFeeRate) {
+      return new BoxedError(
+        "TransactionError",
+        `CPFP package underpays the target rate (${achievedRate.toFixed(3)} < ${packageFeeRate} sat/vB) after fee sizing`,
+      );
+    }
+
+    return new BoxedSuccess({
+      parentHex,
+      childHex,
+      parentTxid,
+      childTxid: childTx.getId(),
+      parentFee,
+      childFee,
+      parentVsize,
+      childVsize,
+      packageFeeRate:
+        (parentFee + childFee) / (parentVsize + childVsize),
+    });
+  } catch (error) {
+    console.error("Error creating CPFP package:", error);
+    return new BoxedError(
+      "TransactionError",
+      "Failed to create CPFP package: " +
+        (error instanceof Error ? error.message : "Unknown error"),
+    );
+  }
 }
 
 export async function getProtostoneTransactionsWithInscription<T>(

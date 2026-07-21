@@ -7,3 +7,4 @@ export * from "./apis";
 export * from "./provider";
 export * from "./utils";
 export * from "./browser-wallets";
+export * from "./boxed";
