@@ -26,7 +26,8 @@ import {
   AvailableEncodeKind as EncKind,
 } from "../encoders";
 import { AlkanesExecuteError } from "../alkanes";
-import { BoxedResponse } from "@/boxed";
+import { BoxedPromise } from "@/boxed";
+import { LegacyCodec, RawCodec } from "../alkabi/codecs";
 
 /*------------------------------------------------------------*
  | 1.  Extra helper – a sentinel for “no input”                |
@@ -42,6 +43,8 @@ export type Enc = EncKind | VoidEnc;
 export type Dec =
   | Exclude<DecKind, "object">
   | BorshSchema<any>
+  | RawCodec<any>
+  | LegacyCodec<any>
   | ArraySchema<any>
   | ObjectSchema<any>;
 
@@ -59,6 +62,7 @@ interface ObjectSchema<F extends Record<string, Schema>> {
 export type Schema =
   | Enc
   | BorshSchema<any>
+  | LegacyCodec<any>
   | ArraySchema<any>
   | ObjectSchema<any>;
 
@@ -75,9 +79,14 @@ export type ResolveSchema<S> =
           ? bigint
           : S extends "boolean"
             ? boolean
-            : /* Borsh — generic or non‑generic */
-              S extends BorshSchema<infer _Any>
-              ? BorshInfer<S>
+            : /* alkabi wire codecs (phantom-typed) */
+              S extends LegacyCodec<infer T>
+              ? T
+              : S extends RawCodec<infer T>
+                ? T
+                : /* Borsh — generic or non‑generic */
+                  S extends BorshSchema<infer _Any>
+                  ? BorshInfer<S>
               : S extends BorshSchema<any>
                 ? BorshInfer<S>
                 : /* compound */
@@ -208,17 +217,21 @@ function defineCustom<
 /*------------------------------------------------------------*
  | 6.  Runtime wiring                                          |
  *------------------------------------------------------------*/
-function wireMethods(
+export function wireMethods(
   target: AlkanesBaseContract,
   spec: Record<string, AnySpec>,
 ) {
   for (const [name, meta] of Object.entries(spec)) {
     /* ---------- VIEW ---------- */
     if (meta._t === VIEW_TAG) {
-      (target as any)[name] = meta.impl
-        ? meta.impl.bind(target)
-        : (arg?: any) =>
-            target.handleView(meta.opcode, arg, meta.input, meta.output);
+      (target as any)[name] = (arg?: any) =>
+        BoxedPromise.from(
+          Promise.resolve(
+            meta.impl
+              ? meta.impl.call(target, arg)
+              : target.handleView(meta.opcode, arg, meta.input, meta.output),
+          ),
+        );
       continue;
     }
 
@@ -249,18 +262,22 @@ function wireMethods(
           [inscr] = mandatoryArgs;
         }
 
-        return meta.impl
-          ? meta.impl.call(target, addr, arg, inscr, maybeTxOpts)
-          : target.handleExecute(
-              addr,
-              meta.opcode,
-              arg,
-              inscr,
-              meta.input,
-              meta.inscription,
-              meta.output,
-              maybeTxOpts,
-            );
+        return BoxedPromise.from(
+          Promise.resolve(
+            meta.impl
+              ? meta.impl.call(target, addr, arg, inscr, maybeTxOpts)
+              : target.handleExecute(
+                  addr,
+                  meta.opcode,
+                  arg,
+                  inscr,
+                  meta.input,
+                  meta.inscription,
+                  meta.output,
+                  maybeTxOpts,
+                ),
+          ),
+        );
       };
       continue;
     }
@@ -281,7 +298,7 @@ function wireMethods(
 /*------------------------------------------------------------*
  | 7.  Duplicate‑opcode guard & table                          |
  *------------------------------------------------------------*/
-function buildOpcodeTable(spec: Record<string, AnySpec>): OpcodeTable {
+export function buildOpcodeTable(spec: Record<string, AnySpec>): OpcodeTable {
   const table: Record<string, bigint> = {};
   for (const [k, v] of Object.entries(spec)) {
     table[k] = v.opcode;
@@ -308,18 +325,14 @@ function attach<
   type ExecuteSignature<E extends ExecuteSpec> = (
     address: string,
     ...args: [...Tail<E>, ProtostoneTransactionOptionsPartial?] // ← NEW optional tail
-  ) => Promise<
-    BoxedResponse<
-      AlkanesPushExecuteResponse<ResolveSchema<E["output"]>>,
-      AlkanesExecuteError
-    >
+  ) => BoxedPromise<
+    AlkanesPushExecuteResponse<ResolveSchema<E["output"]>>,
+    AlkanesExecuteError
   >;
 
   type ViewSignature<V extends ViewSpec> = (
     arg: V["input"] extends VoidEnc ? void : ResolveSchema<V["input"]>,
-  ) => Promise<
-    BoxedResponse<ResolveSchema<V["output"]>, AlkanesSimulationError>
-  >;
+  ) => BoxedPromise<ResolveSchema<V["output"]>, AlkanesSimulationError>;
 
   type CustomSignature<C extends CustomSpec<any, any, any>> =
     C["input"] extends never

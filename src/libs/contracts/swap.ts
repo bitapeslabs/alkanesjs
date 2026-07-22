@@ -536,19 +536,16 @@ export async function buildSwapTransactions(
     const { assetAddress } = normalizeTransactionAddresses(addressProvided);
 
     if (amountIn <= 0n) {
-      return new BoxedError("SwapError", "amountIn must be positive");
+      return new BoxedError("amountIn must be positive", "SwapError");
     }
     if (mode === "exactOut" && minAmountOut <= 0n) {
-      return new BoxedError(
-        "SwapError",
-        "An exact-output swap needs a positive minAmountOut (it IS the requested output)",
-      );
+      return new BoxedError("An exact-output swap needs a positive minAmountOut (it IS the requested output)", "SwapError");
     }
     if (isBtcRef(from) && isBtcRef(to)) {
-      return new BoxedError("SwapError", "BTC to BTC is not a swap");
+      return new BoxedError("BTC to BTC is not a swap", "SwapError");
     }
     if (!isBtcRef(from) && !isBtcRef(to) && alkaneIdsEqual(from, to)) {
-      return new BoxedError("SwapError", "The two sides of a swap must differ");
+      return new BoxedError("The two sides of a swap must differ", "SwapError");
     }
 
     const fromIsFrbtc = !isBtcRef(from) && alkaneIdsEqual(from, frbtcId);
@@ -633,10 +630,7 @@ export async function buildSwapTransactions(
       const premium = consumeOrThrow(await getFrbtcPremium(provider, frbtcId));
       const minted = applyFrbtcPremium(amountIn, premium);
       if (minted <= 0n) {
-        return new BoxedError(
-          "SwapError",
-          "The wrap premium consumes the whole amount; wrap more BTC",
-        );
+        return new BoxedError("The wrap premium consumes the whole amount; wrap more BTC", "SwapError");
       }
 
       const packaged = await getCpfpPackageTransactions(
@@ -679,10 +673,7 @@ export async function buildSwapTransactions(
     const sellId = asAlkaneId(from);
 
     if (minAmountOut < FRBTC_MIN_UNWRAP) {
-      return new BoxedError(
-        "SwapError",
-        `An unwrap must burn at least ${FRBTC_MIN_UNWRAP} sats; raise minAmountOut`,
-      );
+      return new BoxedError(`An unwrap must burn at least ${FRBTC_MIN_UNWRAP} sats; raise minAmountOut`, "SwapError");
     }
 
     const packaged = await getCpfpPackageTransactions(
@@ -727,10 +718,7 @@ export async function buildSwapTransactions(
 
     return new BoxedSuccess(toPackageResult(packaged.data, "swap", "unwrap"));
   } catch (err) {
-    return new BoxedError(
-      "SwapError",
-      `Failed to build the swap transactions: ${(err as Error).message}`,
-    );
+    return new BoxedError(`Failed to build the swap transactions: ${(err as Error).message}`, "SwapError");
   }
 }
 

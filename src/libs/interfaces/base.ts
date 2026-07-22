@@ -1,5 +1,6 @@
 import {
   BoxedResponse,
+  BoxedPromise,
   isBoxedError,
   BoxedSuccess,
   BoxedError,
@@ -23,6 +24,14 @@ import { Expand, sleep } from "@/utils";
 import { BorshSchema, Infer as BorshInfer, borshSerialize } from "borsher";
 import { abi, Schema, ResolveSchema, Dec } from "./builder"; // 🠕
 import { Encodable, EncodeError, EncoderFns } from "../encoders";
+import { LegacyCodec, RawCodec } from "../alkabi/codecs";
+import {
+  PlanExpr,
+  collectPlanKeys,
+  evalPlan,
+  planUsesHeight,
+  bytesToHex,
+} from "../alkabi/plan";
 
 export enum AlkanesSimulationError {
   UnknownError = "UnknownError",
@@ -32,14 +41,25 @@ export enum AlkanesSimulationError {
 export type OpcodeTable = { readonly [K in string]: bigint };
 
 export type AlkanesPushExecuteResponse<T> = Expand<{
-  waitForResult: () => Promise<
-    BoxedResponse<IDecodableAlkanesResponse<T>, AlkanesExecuteError>
+  waitForResult: () => BoxedPromise<
+    IDecodableAlkanesResponse<T>,
+    AlkanesExecuteError
   >;
   txid: string;
 }>;
 
 const isBorshSchema = <T>(schema: Schema | Dec): schema is BorshSchema<T> =>
-  !(typeof schema === "string");
+  typeof schema !== "string" && schema instanceof BorshSchema;
+
+/** espo returns value bytes as "0x…" hex ("0x" for unset). */
+function hexFromEspo(valueHex: string | undefined): Uint8Array {
+  const clean = (valueHex ?? "0x").replace(/^0x/, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }
+  return out;
+}
 
 export abstract class AlkanesBaseContract {
   constructor(
@@ -78,6 +98,14 @@ export abstract class AlkanesBaseContract {
     if (shape === "__void") {
       return new BoxedSuccess([]);
     }
+    /* alkabi legacy calldata (positional u128 words) */
+    if (shape instanceof LegacyCodec) {
+      try {
+        return new BoxedSuccess(shape.encodeCalldata(arg));
+      } catch (error) {
+        return new BoxedError("Legacy encoding failed: " + (error as Error).message, EncodeError.InvalidPayload);
+      }
+    }
     let encoder = isBorshSchema(shape)
       ? new Encodable(arg, shape)
       : new Encodable(arg);
@@ -94,6 +122,13 @@ export abstract class AlkanesBaseContract {
     outShape: O,
   ): BoxedResponse<ResolveSchema<O>, DecodeError> {
     try {
+      /* alkabi raw / legacy returndata (schema-driven decoding) */
+      if (outShape instanceof RawCodec || outShape instanceof LegacyCodec) {
+        const decodable = new DecodableAlkanesResponse(response);
+        return new BoxedSuccess(
+          outShape.decodeReturn(decodable.bytes) as ResolveSchema<O>,
+        );
+      }
       let decodable = isBorshSchema(outShape)
         ? new DecodableAlkanesResponse(response, outShape)
         : new DecodableAlkanesResponse(response);
@@ -102,10 +137,7 @@ export abstract class AlkanesBaseContract {
         : decodable.decodeTo(outShape as keyof DecoderFns<unknown>);
       return new BoxedSuccess(decodedResponse as ResolveSchema<O>);
     } catch (error) {
-      return new BoxedError(
-        DecodeError.UnknownError,
-        "Decoding response failed: " + (error as Error).message,
-      );
+      return new BoxedError("Decoding response failed: " + (error as Error).message, DecodeError.UnknownError);
     }
   }
 
@@ -131,32 +163,28 @@ export abstract class AlkanesBaseContract {
         await sleep(1000);
       }
 
-      return new BoxedSuccess({
-        waitForResult: async (): Promise<
-          BoxedResponse<IDecodableAlkanesResponse<T>, AlkanesExecuteError>
-        > => {
-          try {
-            const traceResult = consumeOrThrow(
-              await this.provider.waitForTraceResult(lastTxid),
-            );
+      const waitForResult = async (): Promise<
+        BoxedResponse<IDecodableAlkanesResponse<T>, AlkanesExecuteError>
+      > => {
+        try {
+          const traceResult = consumeOrThrow(
+            await this.provider.waitForTraceResult(lastTxid),
+          );
 
-            return new BoxedSuccess(
-              new DecodableAlkanesResponse(traceResult.return, borshSchema),
-            );
-          } catch (err) {
-            return new BoxedError(
-              AlkanesExecuteError.UnknownError,
-              "Wait for result failed: " + (err as Error).message,
-            );
-          }
-        },
+          return new BoxedSuccess(
+            new DecodableAlkanesResponse(traceResult.return, borshSchema),
+          );
+        } catch (err) {
+          return new BoxedError("Wait for result failed: " + (err as Error).message, AlkanesExecuteError.UnknownError);
+        }
+      };
+
+      return new BoxedSuccess({
+        waitForResult: () => BoxedPromise.from(waitForResult()),
         txid: lastTxid,
       });
     } catch (err) {
-      return new BoxedError(
-        AlkanesExecuteError.UnknownError,
-        "Push execute failed: " + (err as Error).message,
-      );
+      return new BoxedError("Push execute failed: " + (err as Error).message, AlkanesExecuteError.UnknownError);
     }
   };
 
@@ -182,10 +210,76 @@ export abstract class AlkanesBaseContract {
         consumeOrThrow(this.getDecodedResponse(response, outShape)),
       );
     } catch (error) {
-      return new BoxedError(
-        AlkanesSimulationError.UnknownError,
-        "Simulation failed: " + (error as Error).message,
+      return new BoxedError("Simulation failed: " + (error as Error).message, AlkanesSimulationError.UnknownError);
+    }
+  }
+
+  /**
+   * A view that carries a verified alkabi plan: fetch its storage keys in one
+   * batched espo `get_keys` call and evaluate the plan locally instead of
+   * simulating. Falls back to `handleView` (simulate) if espo isn't configured
+   * or anything goes wrong — a plan is always an optimization, never
+   * load-bearing for correctness.
+   */
+  public async handlePlannedView<I extends Schema, O extends Schema>(
+    opcode: bigint,
+    arg: ResolveSchema<I>,
+    inShape: I,
+    outShape: O,
+    plan: PlanExpr,
+  ): Promise<BoxedResponse<ResolveSchema<O>, AlkanesSimulationError>> {
+    try {
+      if (!this.provider.espoUrl) {
+        return this.handleView(opcode, arg, inShape, outShape);
+      }
+
+      // the plan's calldata is the encoded input words (no opcode prefix)
+      const words = consumeOrThrow(this.getEncodedCallData(arg, inShape));
+
+      let height = 0n;
+      if (planUsesHeight(plan.expr)) {
+        height = BigInt(
+          consumeOrThrow(await this.provider.rpc.alkanes.alkanes_metashrewHeight().call()),
+        );
+      }
+
+      const alkaneStr = `${this.alkaneId.block}:${this.alkaneId.tx}`;
+
+      // resolve keys to a fixpoint (const/templated keys resolve in one round)
+      const storage = new Map<string, Uint8Array>();
+      for (let round = 0; round < 4; round++) {
+        const keys = collectPlanKeys(plan, words, height, storage);
+        const missing = keys.filter((k) => !storage.has(bytesToHex(k)));
+        if (missing.length === 0) break;
+
+        const result = await this.provider.rpc.espo.getKeys(alkaneStr, {
+          keys: missing.map((k) => "0x" + bytesToHex(k)),
+          try_decode_utf8: false,
+        });
+        if (result.isErr()) {
+          return this.handleView(opcode, arg, inShape, outShape);
+        }
+
+        // index the returned items by their (hex) key; unset keys stay empty
+        const items = result.data.items;
+        const byHex = new Map<string, string>();
+        for (const item of Object.values(items)) {
+          byHex.set(item.key_hex.replace(/^0x/, "").toLowerCase(), item.value_hex);
+        }
+        for (const k of missing) {
+          const hex = bytesToHex(k);
+          const valueHex = byHex.get(hex);
+          storage.set(hex, hexFromEspo(valueHex));
+        }
+      }
+
+      const bytes = evalPlan(plan, words, height, storage);
+      return new BoxedSuccess(
+        consumeOrThrow(this.getDecodedResponse(bytes, outShape)),
       );
+    } catch (error) {
+      // any failure → fall back to the authoritative simulate path
+      return this.handleView(opcode, arg, inShape, outShape);
     }
   }
 
@@ -249,10 +343,7 @@ export abstract class AlkanesBaseContract {
         AlkanesExecuteError
       >;
     } catch (error) {
-      return new BoxedError(
-        AlkanesExecuteError.UnknownError,
-        "Execution failed: " + (error as Error).message,
-      );
+      return new BoxedError("Execution failed: " + (error as Error).message, AlkanesExecuteError.UnknownError);
     }
   }
 }

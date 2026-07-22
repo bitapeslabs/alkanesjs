@@ -29,6 +29,7 @@ import {
 
 import { sleep } from "@/utils";
 import { AlkanesSimulationError } from "./libs";
+import { setFetchDebug } from "./debug";
 
 export interface ProviderConfig {
   sandshrewUrl: string;
@@ -39,6 +40,8 @@ export interface ProviderConfig {
   defaultFeeRate?: number;
   btcTicker?: string;
   pacerSettings?: PacerSettings;
+  /** When true, logs every API call as `[CALL] <endpoint> <body>`. */
+  debug?: boolean;
 }
 
 enum AlkanesPollError {
@@ -86,6 +89,16 @@ export class Provider {
 
     this.rpc = new BaseRpcProvider(this);
     this.pacer = new WaitPacer(this.pacerSettings);
+
+    if (config.debug) this.setDebug(true);
+  }
+
+  /**
+   * Toggle debug logging of every API call (`[CALL] <endpoint> <body>`).
+   * All transports share one fetch wrapper, so this flips logging globally.
+   */
+  setDebug(enabled: boolean): void {
+    setFetchDebug(enabled);
   }
 
   protected txUrl(txid: string): string {
@@ -171,10 +184,7 @@ export class Provider {
       }
       return new BoxedSuccess(true);
     } catch (err) {
-      return new BoxedError(
-        AlkanesPollError.UnknownError,
-        "An error occurred while waiting for blocks: " + (err as Error).message,
-      );
+      return new BoxedError("An error occurred while waiting for blocks: " + (err as Error).message, AlkanesPollError.UnknownError);
     }
   };
 
@@ -199,7 +209,7 @@ export class Provider {
       let errors = traceResults.filter(isBoxedError);
       let success = (
         traceResults.filter((result) => !isBoxedError(result)) as
-          | BoxedSuccess<AlkanesTraceResult>[]
+          | BoxedSuccess<AlkanesTraceResult, AlkanesTraceError>[]
           | undefined
       )?.[0]?.data;
 
@@ -222,10 +232,7 @@ export class Provider {
       }
 
       if (maxAttempts-- <= 0) {
-        return new BoxedError(
-          AlkanesTraceError.NoTraceFound,
-          "No trace found for the given txid after 300 attempts",
-        );
+        return new BoxedError("No trace found for the given txid after 300 attempts", AlkanesTraceError.NoTraceFound);
       }
 
       await sleep(2000);
@@ -251,11 +258,8 @@ export class Provider {
       }
       return new BoxedSuccess(true);
     } catch (err) {
-      return new BoxedError(
-        AlkanesPollError.UnknownError,
-        "An error ocurred while waiting for tx confirmation: " +
-          (err as Error).message,
-      );
+      return new BoxedError("An error ocurred while waiting for tx confirmation: " +
+          (err as Error).message, AlkanesPollError.UnknownError);
     }
   };
 }

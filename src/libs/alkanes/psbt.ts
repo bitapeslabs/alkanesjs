@@ -1440,11 +1440,8 @@ export async function getDummyProtostoneTransaction(
     });
   } catch (e) {
     console.log("Error creating dummy transaction", e);
-    return new BoxedError(
-      "TransactionError",
-      "Failed to create dummy transaction: " +
-        (e instanceof Error ? e.message : "Unknown error"),
-    );
+    return new BoxedError("Failed to create dummy transaction: " +
+        (e instanceof Error ? e.message : "Unknown error"), "TransactionError");
   }
 }
 
@@ -1601,10 +1598,7 @@ export async function getCpfpPackageTransactions(
     const parentFee = parentInputValue - sumTxOutputValues(parentTx);
 
     if (parentFee <= 0) {
-      return new BoxedError(
-        "TransactionError",
-        `CPFP parent has a non-positive fee (${parentFee} sats)`,
-      );
+      return new BoxedError(`CPFP parent has a non-positive fee (${parentFee} sats)`, "TransactionError");
     }
 
     /*
@@ -1709,10 +1703,7 @@ export async function getCpfpPackageTransactions(
           });
         }
       } else {
-        return new BoxedError(
-          "TransactionError",
-          "No CPFP parent output is spendable by this wallet; the child cannot be linked to the parent",
-        );
+        return new BoxedError("No CPFP parent output is spendable by this wallet; the child cannot be linked to the parent", "TransactionError");
       }
     }
 
@@ -1803,10 +1794,7 @@ export async function getCpfpPackageTransactions(
         Buffer.from(input.hash).reverse().toString("hex") === parentTxid,
     );
     if (!spendsParent) {
-      return new BoxedError(
-        "TransactionError",
-        "CPFP child does not spend any output of the parent; the package would not be a package",
-      );
+      return new BoxedError("CPFP child does not spend any output of the parent; the package would not be a package", "TransactionError");
     }
 
     /*
@@ -1816,10 +1804,7 @@ export async function getCpfpPackageTransactions(
     */
     const achievedRate = (parentFee + childFee) / (parentVsize + childVsize);
     if (achievedRate + 1e-6 < packageFeeRate) {
-      return new BoxedError(
-        "TransactionError",
-        `CPFP package underpays the target rate (${achievedRate.toFixed(3)} < ${packageFeeRate} sat/vB) after fee sizing`,
-      );
+      return new BoxedError(`CPFP package underpays the target rate (${achievedRate.toFixed(3)} < ${packageFeeRate} sat/vB) after fee sizing`, "TransactionError");
     }
 
     return new BoxedSuccess({
@@ -1836,11 +1821,8 @@ export async function getCpfpPackageTransactions(
     });
   } catch (error) {
     console.error("Error creating CPFP package:", error);
-    return new BoxedError(
-      "TransactionError",
-      "Failed to create CPFP package: " +
-        (error instanceof Error ? error.message : "Unknown error"),
-    );
+    return new BoxedError("Failed to create CPFP package: " +
+        (error instanceof Error ? error.message : "Unknown error"), "TransactionError");
   }
 }
 
@@ -1867,10 +1849,7 @@ export async function getProtostoneTransactionsWithInscription<T>(
       "Error creating Protostone transactions with inscription:",
       error,
     );
-    return new BoxedError(
-      "TransactionError",
-      "Failed to create Protostone transactions with inscription: " +
-        (error instanceof Error ? error.message : "Unknown error"),
-    );
+    return new BoxedError("Failed to create Protostone transactions with inscription: " +
+        (error instanceof Error ? error.message : "Unknown error"), "TransactionError");
   }
 }

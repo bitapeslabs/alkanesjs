@@ -72,7 +72,7 @@ export const execute = async ({
     return new BoxedSuccess(inscriptionTransactions);
   } catch (err) {
     console.error("Alkanes execute error:", err);
-    return new BoxedError(AlkanesExecuteError.UnknownError, (err as Error)?.message ?? "Unknown Error");
+    return new BoxedError((err as Error)?.message ?? "Unknown Error", AlkanesExecuteError.UnknownError);
   }
 };
 

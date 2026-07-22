@@ -25,19 +25,13 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch address data from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch address data from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const json = (await httpResponse.json()) as EsploraAddressResponse;
       return new BoxedSuccess(json);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch address data: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch address data: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -61,10 +55,7 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch UTXOs from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch UTXOs from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const utxos = (await httpResponse.json()) as EsploraUtxo[];
@@ -72,10 +63,7 @@ export class ElectrumApiProvider {
 
       return new BoxedSuccess(confirmedUtxos);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch UTXOs: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch UTXOs: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
   async esplora_getfee(): Promise<BoxedResponse<number, EsploraFetchError>> {
@@ -84,28 +72,19 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch fee estimates from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch fee estimates from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const estimates = await httpResponse.json();
       const fastestFee = estimates["1"];
 
       if (fastestFee === undefined) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Fee tier "1" not available in response`,
-        );
+        return new BoxedError(`Fee tier "1" not available in response`, EsploraFetchError.UnknownError);
       }
 
       return new BoxedSuccess(Number(fastestFee));
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch fee estimates: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch fee estimates: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -128,19 +107,13 @@ export class ElectrumApiProvider {
 
       if (!httpResponse.ok) {
         const errorMessage = await httpResponse.text();
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to broadcast transaction: ${errorMessage}`,
-        );
+        return new BoxedError(`Failed to broadcast transaction: ${errorMessage}`, EsploraFetchError.UnknownError);
       }
 
       const transactionId = (await httpResponse.text()).trim();
       return new BoxedSuccess(transactionId);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to broadcast transaction: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to broadcast transaction: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -156,19 +129,13 @@ export class ElectrumApiProvider {
 
       const httpResponse = await fetch(requestUrl);
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch transactions from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch transactions from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const transactions = (await httpResponse.json()) as IEsploraTransaction[];
       return new BoxedSuccess(transactions);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch address transactions: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch address transactions: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -185,10 +152,7 @@ export class ElectrumApiProvider {
       });
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch transactions from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch transactions from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const transactions = (await httpResponse.json()) as IEsploraTransaction[];
@@ -198,10 +162,7 @@ export class ElectrumApiProvider {
         transactionIds.map((txid) => this.esplora_gettransaction(txid)),
       );
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch bulk transactions: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch bulk transactions: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
   async esplora_getblocktiphash(): Promise<
@@ -212,19 +173,34 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch tip hash from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch tip hash from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const tipHash = (await httpResponse.text()).trim();
       return new BoxedSuccess(tipHash);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch tip hash: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch tip hash: ${(error as Error).message}`, EsploraFetchError.UnknownError);
+    }
+  }
+
+  async esplora_getblocktipheight(): Promise<
+    BoxedResponse<number, EsploraFetchError>
+  > {
+    try {
+      const requestUrl = `${this.electrumApiUrl}/blocks/tip/height`;
+      const httpResponse = await fetch(requestUrl);
+
+      if (!httpResponse.ok) {
+        return new BoxedError(`Failed to fetch tip height from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
+      }
+
+      const height = Number((await httpResponse.text()).trim());
+      if (!Number.isFinite(height)) {
+        return new BoxedError("Tip height response was not a number", EsploraFetchError.UnknownError);
+      }
+      return new BoxedSuccess(height);
+    } catch (error) {
+      return new BoxedError(`Failed to fetch tip height: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
   async _esplora_getrawblock(
@@ -235,10 +211,7 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch raw block ${blockHash} from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch raw block ${blockHash} from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       // ── convert ArrayBuffer → Uint8Array → hex string ────────────────────
@@ -249,10 +222,7 @@ export class ElectrumApiProvider {
 
       return new BoxedSuccess("0x" + rawHex);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch raw block ${blockHash}: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch raw block ${blockHash}: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -292,10 +262,7 @@ export class ElectrumApiProvider {
         return error;
       }
 
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch bulk transactions: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch bulk transactions: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
   */
@@ -307,19 +274,13 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch transaction ${transactionId} from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch transaction ${transactionId} from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const transaction = (await httpResponse.json()) as IEsploraTransaction;
       return new BoxedSuccess(transaction);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch transaction ${transactionId}: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch transaction ${transactionId}: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -331,19 +292,13 @@ export class ElectrumApiProvider {
       const httpResponse = await fetch(requestUrl);
 
       if (!httpResponse.ok) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Failed to fetch raw transaction ${transactionId} from ${requestUrl}: ${httpResponse.statusText}`,
-        );
+        return new BoxedError(`Failed to fetch raw transaction ${transactionId} from ${requestUrl}: ${httpResponse.statusText}`, EsploraFetchError.UnknownError);
       }
 
       const rawHex = await httpResponse.text();
       return new BoxedSuccess(rawHex);
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to fetch raw transaction ${transactionId}: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to fetch raw transaction ${transactionId}: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 
@@ -364,10 +319,7 @@ export class ElectrumApiProvider {
     for (const unspentOutput of utxoList) {
       const fullTransaction = transactionMap.get(unspentOutput.txid);
       if (!fullTransaction) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Transaction not found for txid ${unspentOutput.txid}`,
-        );
+        return new BoxedError(`Transaction not found for txid ${unspentOutput.txid}`, EsploraFetchError.UnknownError);
       }
       spendableInputs.push({
         ...unspentOutput,
@@ -383,10 +335,7 @@ export class ElectrumApiProvider {
   ): BoxedResponse<EsploraUtxo, EsploraFetchError> {
     const output = transaction.vout[voutIndex];
     if (!output) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Vout index ${voutIndex} not found in transaction ${transaction.txid}`,
-      );
+      return new BoxedError(`Vout index ${voutIndex} not found in transaction ${transaction.txid}`, EsploraFetchError.UnknownError);
     }
 
     return new BoxedSuccess({
@@ -402,10 +351,7 @@ export class ElectrumApiProvider {
   ): Promise<BoxedResponse<EsploraUtxo, EsploraFetchError>> {
     try {
       if (!utxoString || !utxoString.includes(":")) {
-        return new BoxedError(
-          EsploraFetchError.UnknownError,
-          `Invalid UTXO format: ${utxoString}. Expected format is "txid:vout".`,
-        );
+        return new BoxedError(`Invalid UTXO format: ${utxoString}. Expected format is "txid:vout".`, EsploraFetchError.UnknownError);
       }
 
       const [transactionId, voutString] = utxoString.split(":");
@@ -419,10 +365,7 @@ export class ElectrumApiProvider {
         voutIndex,
       );
     } catch (error) {
-      return new BoxedError(
-        EsploraFetchError.UnknownError,
-        `Failed to get UTXO: ${(error as Error).message}`,
-      );
+      return new BoxedError(`Failed to get UTXO: ${(error as Error).message}`, EsploraFetchError.UnknownError);
     }
   }
 }

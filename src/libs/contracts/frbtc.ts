@@ -110,26 +110,17 @@ export async function getFrbtcSignerScript(
   try {
     const signer = await provider.rpc.espo.getSubfrostSigner();
     if (signer.isErr()) {
-      return new BoxedError(
-        "FrbtcSignerError",
-        `subfrost.get_signer failed: ${signer.message ?? String(signer.errorType)}`,
-      );
+      return new BoxedError(`subfrost.get_signer failed: ${signer.message ?? String(signer.errorType)}`, "FrbtcSignerError");
     }
 
     const hex = signer.data.script_pubkey.replace(/^0x/, "");
     const script = Buffer.from(hex, "hex");
     if (script.length !== 34 || script[0] !== 0x51 || script[1] !== 0x20) {
-      return new BoxedError(
-        "FrbtcSignerError",
-        `subfrost.get_signer returned a non-P2TR script: ${hex}`,
-      );
+      return new BoxedError(`subfrost.get_signer returned a non-P2TR script: ${hex}`, "FrbtcSignerError");
     }
     return new BoxedSuccess(script);
   } catch (err) {
-    return new BoxedError(
-      "FrbtcSignerError",
-      `Failed to resolve the frBTC signer: ${(err as Error).message}`,
-    );
+    return new BoxedError(`Failed to resolve the frBTC signer: ${(err as Error).message}`, "FrbtcSignerError");
   }
 }
 
@@ -145,10 +136,7 @@ export async function getFrbtcSignerAddress(
   try {
     return new BoxedSuccess(baddress.fromOutputScript(script.data, network));
   } catch (err) {
-    return new BoxedError(
-      "FrbtcSignerError",
-      `frBTC signer script is not encodable as an address on this network: ${(err as Error).message}`,
-    );
+    return new BoxedError(`frBTC signer script is not encodable as an address on this network: ${(err as Error).message}`, "FrbtcSignerError");
   }
 }
 

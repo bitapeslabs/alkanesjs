@@ -226,10 +226,7 @@ export const AmmFactoryABI = abi.contract({
         ],
       });
       if (isBoxedError(simulated)) {
-        return new BoxedError(
-          AlkanesSimulationError.UnknownError,
-          simulated.message ?? "find_existing_pool_id failed",
-        );
+        return new BoxedError(simulated.message ?? "find_existing_pool_id failed", AlkanesSimulationError.UnknownError);
       }
       const words = new DecodableAlkanesResponse(simulated.data).decodeTo(
         "bigintArray",
@@ -380,10 +377,7 @@ export async function findPoolId(
     if (simulated.errorType === AlkanesSimulationError.TransactionReverted) {
       return new BoxedSuccess(null);
     }
-    return new BoxedError(
-      "AmmLookupError",
-      `find_existing_pool_id failed: ${simulated.message ?? simulated.errorType}`,
-    );
+    return new BoxedError(`find_existing_pool_id failed: ${simulated.message ?? simulated.errorType}`, "AmmLookupError");
   }
 
   try {
@@ -392,10 +386,7 @@ export async function findPoolId(
     );
     return new BoxedSuccess(decodePoolIdWords(words));
   } catch (err) {
-    return new BoxedError(
-      "AmmLookupError",
-      `Could not decode the pool id: ${(err as Error).message}`,
-    );
+    return new BoxedError(`Could not decode the pool id: ${(err as Error).message}`, "AmmLookupError");
   }
 }
 
@@ -409,10 +400,7 @@ export async function getAllPoolIds(
     callData: [AMM_FACTORY_OPCODES.getAllPools],
   });
   if (isBoxedError(simulated)) {
-    return new BoxedError(
-      "AmmLookupError",
-      `get_all_pools failed: ${simulated.message ?? simulated.errorType}`,
-    );
+    return new BoxedError(`get_all_pools failed: ${simulated.message ?? simulated.errorType}`, "AmmLookupError");
   }
 
   try {
@@ -421,10 +409,7 @@ export async function getAllPoolIds(
     );
     return new BoxedSuccess(decodeAlkaneIdVec(words));
   } catch (err) {
-    return new BoxedError(
-      "AmmLookupError",
-      `Could not decode the pool list: ${(err as Error).message}`,
-    );
+    return new BoxedError(`Could not decode the pool list: ${(err as Error).message}`, "AmmLookupError");
   }
 }
 
@@ -505,17 +490,11 @@ export async function getPoolState(
     callData: [AMM_POOL_OPCODES.getReserves],
   });
   if (isBoxedError(reservesSim)) {
-    return new BoxedError(
-      "AmmLookupError",
-      `Neither pool_details (999) nor get_reserves (97) could be read for pool ${poolId.block}:${poolId.tx}`,
-    );
+    return new BoxedError(`Neither pool_details (999) nor get_reserves (97) could be read for pool ${poolId.block}:${poolId.tx}`, "AmmLookupError");
   }
 
   if (!tokensHint) {
-    return new BoxedError(
-      "AmmLookupError",
-      "pool_details (999) was unreadable and no token hint was supplied, so the reserve order cannot be resolved",
-    );
+    return new BoxedError("pool_details (999) was unreadable and no token hint was supplied, so the reserve order cannot be resolved", "AmmLookupError");
   }
 
   try {
@@ -523,10 +502,7 @@ export async function getPoolState(
       "bigintArray",
     );
     if (words.length < 2) {
-      return new BoxedError(
-        "AmmLookupError",
-        "get_reserves returned no reserves",
-      );
+      return new BoxedError("get_reserves returned no reserves", "AmmLookupError");
     }
     const [token0, token1] = sortAlkaneIds(tokensHint[0], tokensHint[1]);
     return new BoxedSuccess({
@@ -537,10 +513,7 @@ export async function getPoolState(
       feePer1000,
     });
   } catch (err) {
-    return new BoxedError(
-      "AmmLookupError",
-      `Could not decode the reserves: ${(err as Error).message}`,
-    );
+    return new BoxedError(`Could not decode the reserves: ${(err as Error).message}`, "AmmLookupError");
   }
 }
 

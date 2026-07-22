@@ -1,3 +1,4 @@
+export * from "./alkabi";
 export * from "./alkanes";
 export * from "./interfaces";
 export * from "./contracts";

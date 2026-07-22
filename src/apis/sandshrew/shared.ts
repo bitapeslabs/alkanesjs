@@ -53,32 +53,23 @@ export function buildRpcCall<T, E = unknown>(
             params
           )}, status: ${res.status}, response: ${responseBody}`
         );
-        return new BoxedError(RpcError.UnknownError, responseBody);
+        return new BoxedError(responseBody, RpcError.UnknownError);
       }
 
       try {
         const json = JSON.parse(responseBody);
 
         if (json.error) {
-          return new BoxedError(
-            RpcError.InternalError,
-            `Method ${method} with params ${params} failed with error: ${JSON.stringify(json.error)}`
-          );
+          return new BoxedError(`Method ${method} with params ${params} failed with error: ${JSON.stringify(json.error)}`, RpcError.InternalError);
         }
 
         return new BoxedSuccess(json.result as T);
       } catch (e) {
-        return new BoxedError(
-          RpcError.UnknownError,
-          `Failed to parse JSON response for method ${method} with params ${params}: ${responseBody}`
-        );
+        return new BoxedError(`Failed to parse JSON response for method ${method} with params ${params}: ${responseBody}`, RpcError.UnknownError);
       }
     } catch (err) {
       console.error(err);
-      return new BoxedError(
-        RpcError.UnknownError,
-        (err as Error)?.message ?? "Unknown Error"
-      );
+      return new BoxedError((err as Error)?.message ?? "Unknown Error", RpcError.UnknownError);
     }
   };
 

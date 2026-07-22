@@ -128,10 +128,7 @@ export class OrdRpcProvider {
       const decoded = decodeCBOR(hexResponse.data);
       return new BoxedSuccess(decoded);
     } catch (error) {
-      return new BoxedError(
-        OrdFetchError.UnknownError,
-        (error as Error).message ?? "Failed to decode CBOR"
-      );
+      return new BoxedError((error as Error).message ?? "Failed to decode CBOR", OrdFetchError.UnknownError);
     }
   }
 }

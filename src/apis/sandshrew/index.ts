@@ -70,23 +70,17 @@ export class SandshrewRpcProvider {
       );
 
       if (errors.length > 0) {
-        return new BoxedError(
-          SandshrewFetchError.InternalError,
-          `
+        return new BoxedError(`
           Some RPC calls failed:
           ${errors.map((error, index) => `(${index}) Method ${rpcCalls[index].call.name} with params ${rpcCalls[index].payload} failed with error: ${error}\n\n`)}
-          `,
-        );
+          `, SandshrewFetchError.InternalError);
       }
 
       return new BoxedSuccess(
         rpcResponse.map((response) => response.result) as T[],
       );
     } catch (error) {
-      return new BoxedError(
-        SandshrewFetchError.UnknownError,
-        (error as Error).message ?? "Unknown Error",
-      );
+      return new BoxedError((error as Error).message ?? "Unknown Error", SandshrewFetchError.UnknownError);
     }
   }
 
@@ -155,10 +149,7 @@ export class SandshrewRpcProvider {
         );
 
         if (!spendableInput) {
-          return new BoxedError(
-            SandshrewFetchError.UnknownError,
-            `Spendable input not found for ${rawUtxo.txid}:${rawUtxo.vout}`,
-          );
+          return new BoxedError(`Spendable input not found for ${rawUtxo.txid}:${rawUtxo.vout}`, SandshrewFetchError.UnknownError);
         }
 
         const confirmations =
@@ -213,10 +204,7 @@ export class SandshrewRpcProvider {
       return new BoxedSuccess(formattedList);
     } catch (error) {
       console.error(error);
-      return new BoxedError(
-        SandshrewFetchError.UnknownError,
-        (error as Error).message,
-      );
+      return new BoxedError((error as Error).message, SandshrewFetchError.UnknownError);
     }
   }
 }
