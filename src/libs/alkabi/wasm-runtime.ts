@@ -52,6 +52,22 @@ export interface WasmViewOptions {
 
 const EMPTY = new Uint8Array(0);
 
+/**
+ * The height handed to a view that didn't ask for the real one. Most views never
+ * read the height at all, and fetching it costs a round-trip on every call, so
+ * it is only looked up when asked for — see `ViewCallOptions.latestHeight`.
+ */
+export const PLACEHOLDER_HEIGHT = 0xffffffn;
+
+export interface ViewCallOptions {
+  /**
+   * Look up espo's tip height before running, instead of passing
+   * `PLACEHOLDER_HEIGHT`. Only views whose answer depends on the current block
+   * need this; for the rest it is a wasted round-trip.
+   */
+  latestHeight?: boolean;
+}
+
 /** Storage keys are a readable keyword followed by binary, so show both. */
 function describeKey(key: Uint8Array): string {
   let text = "";
@@ -196,6 +212,8 @@ interface RunOutcome {
   data?: Uint8Array;
   error?: unknown;
   misses: Set<string>;
+  /** whether the contract read the height — see `PLACEHOLDER_HEIGHT` */
+  readHeight: boolean;
 }
 
 /**
@@ -210,6 +228,7 @@ function runOnce(
   storage: Map<string, Uint8Array>,
 ): RunOutcome {
   const misses = new Set<string>();
+  let readHeight = false;
   let instance: WebAssembly.Instance | undefined;
 
   const memory = (): Uint8Array => {
@@ -258,7 +277,11 @@ function runOnce(
       lookup(lenPrefixed(ptr), "__request_storage").length,
     __load_storage: (keyPtr, outPtr) =>
       write(outPtr, lookup(lenPrefixed(keyPtr), "__load_storage")),
-    __height: (ptr) => write(ptr, u64le(height)),
+    __height: (ptr) => {
+      readHeight = true;
+      debugEvent("HOST", `__height → ${height}`);
+      return write(ptr, u64le(height));
+    },
     __sequence: (ptr) => write(ptr, u128le(0n)),
     __fuel: (ptr) => write(ptr, u64le(0n)),
     __balance: (_who, _what, ptr) => write(ptr, u128le(0n)),
@@ -284,9 +307,13 @@ function runOnce(
     instance = new WebAssembly.Instance(module, imports);
     const execute = instance.exports.__execute as (() => number) | undefined;
     if (!execute) throw new Error("wasm view: contract exports no __execute");
-    return { data: parseResponseData(lenPrefixed(execute())), misses };
+    return {
+      data: parseResponseData(lenPrefixed(execute())),
+      misses,
+      readHeight,
+    };
   } catch (error) {
-    return { error, misses };
+    return { error, misses, readHeight };
   }
 }
 
@@ -306,7 +333,12 @@ export async function runWasmView(o: WasmViewOptions): Promise<Uint8Array> {
   const maxRounds = o.maxRounds ?? 8;
 
   for (let round = 0; round < maxRounds; round++) {
-    const { data, error, misses } = runOnce(module, context, o.height, storage);
+    const { data, error, misses, readHeight } = runOnce(
+      module,
+      context,
+      o.height,
+      storage,
+    );
     debugEvent(
       "WASM",
       error
@@ -320,6 +352,13 @@ export async function runWasmView(o: WasmViewOptions): Promise<Uint8Array> {
     // outcome is the true one — whether that's an answer or a genuine failure.
     if (misses.size === 0) {
       if (error) throw error;
+      if (readHeight && o.height === PLACEHOLDER_HEIGHT) {
+        debugEvent(
+          "WASM",
+          "this view reads the height but ran on the placeholder — " +
+            "pass { latestHeight: true } if its answer depends on the block",
+        );
+      }
       return data!;
     }
     // Otherwise the run was working from incomplete storage; an error here is

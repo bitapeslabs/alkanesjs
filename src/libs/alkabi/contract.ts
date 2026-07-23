@@ -14,6 +14,7 @@
 ──────────────────────────────────────────────────────────────*/
 
 import { BorshSchema } from "borsher";
+import type { ViewCallOptions } from "./wasm-runtime";
 import { AlkaneId } from "@/apis";
 import { Provider } from "@/provider";
 import { BoxedPromise } from "@/boxed";
@@ -109,13 +110,18 @@ export function specFromAlkabi(
       // fallback) instead of by simulating.
       if (wasm) {
         const inShape = input ?? "__void";
-        viewSpec.impl = function (this: AlkanesBaseContract, arg: any) {
+        viewSpec.impl = function (
+          this: AlkanesBaseContract,
+          arg: any,
+          opts?: ViewCallOptions,
+        ) {
           return this.handleWasmView(
             opcode,
             arg,
             inShape as any,
             output as any,
             wasm,
+            opts,
           );
         };
       }
@@ -149,8 +155,9 @@ type OutOf<M, T extends AlkabiTypes> = M extends { output: infer O }
 type ViewFn<M, T extends AlkabiTypes> = M extends { input: infer I }
   ? (
       arg: InferAlkabiIo<I, T>,
+      opts?: ViewCallOptions,
     ) => BoxedPromise<OutOf<M, T>, AlkanesSimulationError>
-  : () => BoxedPromise<OutOf<M, T>, AlkanesSimulationError>;
+  : (opts?: ViewCallOptions) => BoxedPromise<OutOf<M, T>, AlkanesSimulationError>;
 
 type ExecuteTail<M, T extends AlkabiTypes> = M extends { input: infer I }
   ? M extends { witness: infer W }

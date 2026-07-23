@@ -25,7 +25,12 @@ import { BorshSchema, Infer as BorshInfer, borshSerialize } from "borsher";
 import { abi, Schema, ResolveSchema, Dec } from "./builder"; // 🠕
 import { Encodable, EncodeError, EncoderFns } from "../encoders";
 import { LegacyCodec, RawCodec } from "../alkabi/codecs";
-import { runWasmView, bytesToHex } from "../alkabi/wasm-runtime";
+import {
+  runWasmView,
+  bytesToHex,
+  PLACEHOLDER_HEIGHT,
+  type ViewCallOptions,
+} from "../alkabi/wasm-runtime";
 
 export enum AlkanesSimulationError {
   UnknownError = "UnknownError",
@@ -224,6 +229,7 @@ export abstract class AlkanesBaseContract {
     inShape: I,
     outShape: O,
     wasm: Uint8Array | WebAssembly.Module,
+    opts?: ViewCallOptions,
   ): Promise<BoxedResponse<ResolveSchema<O>, AlkanesSimulationError>> {
     try {
       if (!this.provider.espoUrl) {
@@ -231,11 +237,14 @@ export abstract class AlkanesBaseContract {
       }
 
       const words = consumeOrThrow(this.getEncodedCallData(arg, inShape));
-      const height = BigInt(
-        consumeOrThrow(
-          await this.provider.rpc.alkanes.alkanes_metashrewHeight().call(),
-        ),
-      );
+      // The height comes from espo, the same place the storage does, so a view
+      // that reads both sees one coherent view of the chain. Only fetched when
+      // the caller says the answer depends on it.
+      let height = PLACEHOLDER_HEIGHT;
+      if (opts?.latestHeight) {
+        const tip = consumeOrThrow(await this.provider.rpc.espo.getTipHeight());
+        height = BigInt(typeof tip === "number" ? tip : tip.height);
+      }
       const alkaneStr = `${this.alkaneId.block}:${this.alkaneId.tx}`;
 
       const bytes = await runWasmView({

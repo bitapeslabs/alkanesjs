@@ -107,7 +107,11 @@ export interface ViewSpec<I extends Schema = Schema, O extends Dec = Dec> {
   opcode: bigint;
   input: I;
   output: O;
-  impl?: (this: AlkanesBaseContract, arg: ResolveSchema<I>) => any;
+  impl?: (
+    this: AlkanesBaseContract,
+    arg: ResolveSchema<I>,
+    opts?: unknown,
+  ) => any;
 }
 
 /** inscription (K) is either a BorshSchema or the sentinel */
@@ -224,14 +228,20 @@ export function wireMethods(
   for (const [name, meta] of Object.entries(spec)) {
     /* ---------- VIEW ---------- */
     if (meta._t === VIEW_TAG) {
-      (target as any)[name] = (arg?: any) =>
-        BoxedPromise.from(
+      // A view with no calldata takes only the per-call options, so the first
+      // argument is those options rather than an input value.
+      const takesInput = meta.input !== VOID_ENC;
+      (target as any)[name] = (first?: any, second?: any) => {
+        const arg = takesInput ? first : undefined;
+        const opts = takesInput ? second : first;
+        return BoxedPromise.from(
           Promise.resolve(
             meta.impl
-              ? meta.impl.call(target, arg)
+              ? meta.impl.call(target, arg, opts)
               : target.handleView(meta.opcode, arg, meta.input, meta.output),
           ),
         );
+      };
       continue;
     }
 
