@@ -215,6 +215,30 @@ export function evalNum(
     if (d === 0n) throw new Error("plan: modulo by zero");
     return evalNum(a, ctx, varVal) % d;
   }
+  if ("shr" in o) {
+    const [a, b] = o.shr as [unknown, unknown];
+    const s = evalNum(b, ctx, varVal);
+    const x = evalNum(a, ctx, varVal);
+    return s >= 128n ? 0n : x >> s;
+  }
+  if ("shl" in o) {
+    const [a, b] = o.shl as [unknown, unknown];
+    const s = evalNum(b, ctx, varVal);
+    const x = evalNum(a, ctx, varVal);
+    return s >= 128n ? 0n : (x << s) & U128_MASK;
+  }
+  if ("and" in o) {
+    const [a, b] = o.and as [unknown, unknown];
+    return evalNum(a, ctx, varVal) & evalNum(b, ctx, varVal);
+  }
+  if ("or" in o) {
+    const [a, b] = o.or as [unknown, unknown];
+    return evalNum(a, ctx, varVal) | evalNum(b, ctx, varVal);
+  }
+  if ("xor" in o) {
+    const [a, b] = o.xor as [unknown, unknown];
+    return evalNum(a, ctx, varVal) ^ evalNum(b, ctx, varVal);
+  }
 
   throw new Error(`plan: unrecognized num expr: ${JSON.stringify(expr)}`);
 }
@@ -383,7 +407,7 @@ function collectNum(expr: unknown, c: Collector, varVal: bigint | undefined): vo
   const o = obj(expr);
   if ("u" in o) return collectBytes(o.u, c, varVal);
   if ("len" in o) return collectBytes(o.len, c, varVal);
-  for (const k of ["add", "sub", "mul", "div", "mod"]) {
+  for (const k of ["add", "sub", "mul", "div", "mod", "shr", "shl", "and", "or", "xor"]) {
     if (k in o) {
       const [a, b] = o[k] as [unknown, unknown];
       collectNum(a, c, varVal);
