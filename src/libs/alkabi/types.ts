@@ -54,32 +54,11 @@ export interface AlkabiMethodDef {
   readonly witness?: AlkabiIoDef;
   /** Response data; absent means void. */
   readonly output?: AlkabiIoDef;
-  /**
-   * A verified static fast-path: a pure expression over storage keys, calldata,
-   * and height that reproduces this view's response bytes without simulating.
-   * Synthesized by alkabi's wasm analysis (`--plans`) and verified against the
-   * bytecode. When present and the provider has an `espoUrl`, `AlkanesContract`
-   * evaluates it — fetching storage in one batched espo `get_keys` call — in
-   * place of `simulate`, falling back to simulate on any error.
-   */
-  readonly plan?: AlkabiPlan;
-}
-
-/** Opaque for now — see the alkabi plan grammar (Rust `alkabi::plan`). */
-export interface AlkabiPlan {
-  readonly v: number;
-  readonly expr: unknown;
 }
 
 export interface AlkabiDocument {
   readonly alkabi: number;
   readonly contract: string;
-  /**
-   * Randomized differential-trial count every plan in this document survived
-   * against the bytecode. Uniform across plans, so recorded once here rather
-   * than on each method's plan. Absent when the document carries no plans.
-   */
-  readonly trials?: number;
   readonly types: { readonly [name: string]: AlkabiSchemaDef };
   readonly methods: readonly AlkabiMethodDef[];
 }

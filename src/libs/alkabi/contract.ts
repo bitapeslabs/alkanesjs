@@ -82,7 +82,10 @@ function outputShape(io: AlkabiIoDef | undefined, types: AlkabiTypes): Dec {
  * shape `abi.contract({...})` produces by hand, so it composes with
  * `abi.extend` / `abi.attach` and custom offchain methods.
  */
-export function specFromAlkabi(document: AlkabiDocument) {
+export function specFromAlkabi(
+  document: AlkabiDocument,
+  wasm?: Uint8Array | WebAssembly.Module,
+) {
   const spec: Record<string, any> = {};
 
   for (const method of document.methods) {
@@ -101,18 +104,18 @@ export function specFromAlkabi(document: AlkabiDocument) {
         .view(input as any)
         .returns(output as any);
 
-      // A verified plan turns this view into a batched get_keys read + local
-      // evaluation (with automatic simulate fallback), instead of a simulate.
-      if (method.plan) {
-        const plan = method.plan;
+      // Given the contract's own bytes, a view is answered by running them
+      // against a stub host reading storage from espo (with automatic simulate
+      // fallback) instead of by simulating.
+      if (wasm) {
         const inShape = input ?? "__void";
         viewSpec.impl = function (this: AlkanesBaseContract, arg: any) {
-          return this.handlePlannedView(
+          return this.handleWasmView(
             opcode,
             arg,
             inShape as any,
             output as any,
-            plan,
+            wasm,
           );
         };
       }
@@ -179,6 +182,15 @@ export interface AlkanesContractOptions {
   provider: Provider;
   alkaneId: AlkaneId;
   signPsbt: (unsigned: string) => Promise<string>;
+  /**
+   * The contract's own wasm. Supply it and view methods are answered by running
+   * the contract locally against storage read from espo, instead of by asking
+   * the indexer to simulate. Exact for any pure view; anything that reaches
+   * outside its own storage falls back to simulate on its own.
+   *
+   * Pass a pre-compiled `WebAssembly.Module` to skip recompiling per contract.
+   */
+  wasm?: Uint8Array | WebAssembly.Module;
 }
 
 export type AlkanesContractInstance<D extends AlkabiDocument> =
@@ -193,7 +205,7 @@ class AlkanesContractImpl extends AlkanesBaseContract {
 
   constructor(document: AlkabiDocument, options: AlkanesContractOptions) {
     super(options.provider, options.alkaneId, options.signPsbt);
-    const spec = specFromAlkabi(document);
+    const spec = specFromAlkabi(document, options.wasm);
     this.opcodeTable = buildOpcodeTable(spec);
     wireMethods(this, spec);
   }

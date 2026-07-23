@@ -25,13 +25,7 @@ import { BorshSchema, Infer as BorshInfer, borshSerialize } from "borsher";
 import { abi, Schema, ResolveSchema, Dec } from "./builder"; // 🠕
 import { Encodable, EncodeError, EncoderFns } from "../encoders";
 import { LegacyCodec, RawCodec } from "../alkabi/codecs";
-import {
-  PlanExpr,
-  collectPlanKeys,
-  evalPlan,
-  planUsesHeight,
-  bytesToHex,
-} from "../alkabi/plan";
+import { runWasmView, bytesToHex } from "../alkabi/wasm-runtime";
 
 export enum AlkanesSimulationError {
   UnknownError = "UnknownError",
@@ -215,69 +209,62 @@ export abstract class AlkanesBaseContract {
   }
 
   /**
-   * A view that carries a verified alkabi plan: fetch its storage keys in one
-   * batched espo `get_keys` call and evaluate the plan locally instead of
-   * simulating. Falls back to `handleView` (simulate) if espo isn't configured
-   * or anything goes wrong — a plan is always an optimization, never
-   * load-bearing for correctness.
+   * A view evaluated by running the contract's own wasm instead of asking the
+   * indexer to simulate it. Storage the contract reaches for is fetched from
+   * espo in batches (see `runWasmView`), so this costs a handful of key reads
+   * rather than a simulate — and it is exact, because it *is* the contract.
+   *
+   * Needs espo and the contract bytes; without either, or if the view turns out
+   * to be impure, or on any failure at all, it falls back to simulate. Running
+   * the wasm is an optimization, never load-bearing for correctness.
    */
-  public async handlePlannedView<I extends Schema, O extends Schema>(
+  public async handleWasmView<I extends Schema, O extends Schema>(
     opcode: bigint,
     arg: ResolveSchema<I>,
     inShape: I,
     outShape: O,
-    plan: PlanExpr,
+    wasm: Uint8Array | WebAssembly.Module,
   ): Promise<BoxedResponse<ResolveSchema<O>, AlkanesSimulationError>> {
     try {
       if (!this.provider.espoUrl) {
         return this.handleView(opcode, arg, inShape, outShape);
       }
 
-      // the plan's calldata is the encoded input words (no opcode prefix)
       const words = consumeOrThrow(this.getEncodedCallData(arg, inShape));
-
-      let height = 0n;
-      if (planUsesHeight(plan.expr)) {
-        height = BigInt(
-          consumeOrThrow(await this.provider.rpc.alkanes.alkanes_metashrewHeight().call()),
-        );
-      }
-
+      const height = BigInt(
+        consumeOrThrow(
+          await this.provider.rpc.alkanes.alkanes_metashrewHeight().call(),
+        ),
+      );
       const alkaneStr = `${this.alkaneId.block}:${this.alkaneId.tx}`;
 
-      // resolve keys to a fixpoint (const/templated keys resolve in one round)
-      const storage = new Map<string, Uint8Array>();
-      for (let round = 0; round < 4; round++) {
-        const keys = collectPlanKeys(plan, words, height, storage);
-        const missing = keys.filter((k) => !storage.has(bytesToHex(k)));
-        if (missing.length === 0) break;
+      const bytes = await runWasmView({
+        wasm,
+        alkaneId: this.alkaneId,
+        opcode,
+        words,
+        height,
+        fetchKeys: async (keys) => {
+          const result = await this.provider.rpc.espo.getKeys(alkaneStr, {
+            keys: keys.map((k) => "0x" + bytesToHex(k)),
+            try_decode_utf8: false,
+          });
+          if (result.isErr()) throw new Error("espo get_keys failed");
+          const out = new Map<string, Uint8Array>();
+          for (const item of Object.values(result.data.items)) {
+            out.set(
+              item.key_hex.replace(/^0x/, "").toLowerCase(),
+              hexFromEspo(item.value_hex),
+            );
+          }
+          return out;
+        },
+      });
 
-        const result = await this.provider.rpc.espo.getKeys(alkaneStr, {
-          keys: missing.map((k) => "0x" + bytesToHex(k)),
-          try_decode_utf8: false,
-        });
-        if (result.isErr()) {
-          return this.handleView(opcode, arg, inShape, outShape);
-        }
-
-        // index the returned items by their (hex) key; unset keys stay empty
-        const items = result.data.items;
-        const byHex = new Map<string, string>();
-        for (const item of Object.values(items)) {
-          byHex.set(item.key_hex.replace(/^0x/, "").toLowerCase(), item.value_hex);
-        }
-        for (const k of missing) {
-          const hex = bytesToHex(k);
-          const valueHex = byHex.get(hex);
-          storage.set(hex, hexFromEspo(valueHex));
-        }
-      }
-
-      const bytes = evalPlan(plan, words, height, storage);
       return new BoxedSuccess(
         consumeOrThrow(this.getDecodedResponse(bytes, outShape)),
       );
-    } catch (error) {
+    } catch {
       // any failure → fall back to the authoritative simulate path
       return this.handleView(opcode, arg, inShape, outShape);
     }
