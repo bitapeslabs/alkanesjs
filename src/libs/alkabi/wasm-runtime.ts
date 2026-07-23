@@ -161,6 +161,14 @@ const IMPURE = new Set([
 
 /** Raised from an import the stub host can't stand in for. Never recoverable
  *  by fetching more storage, so it aborts the run rather than retrying. */
+/** The contract panicked — `env.abort`. Its own revert, not a host gap. */
+export class ContractRevertError extends Error {
+  constructor() {
+    super("wasm view: contract reverted");
+    this.name = "ContractRevertError";
+  }
+}
+
 export class UnrunnableViewError extends Error {
   constructor(name: string) {
     super(
@@ -237,6 +245,9 @@ function runOnce(
     __fuel: (ptr) => write(ptr, u64le(0n)),
     __balance: (_who, _what, ptr) => write(ptr, u128le(0n)),
     __log: () => undefined,
+    abort: () => {
+      throw new ContractRevertError();
+    },
   };
 
   const imports: WebAssembly.Imports = {};
@@ -293,7 +304,12 @@ export async function runWasmView(o: WasmViewOptions): Promise<Uint8Array> {
     }
     // Otherwise the run was working from incomplete storage; an error here is
     // most likely a consequence of that, so fetch and try again.
-    if (error instanceof UnrunnableViewError) throw error;
+    if (
+      error instanceof UnrunnableViewError ||
+      error instanceof ContractRevertError
+    ) {
+      throw error;
+    }
 
     const fetched = await o.fetchKeys([...misses].map(hexToBytes));
     for (const hex of misses) {
