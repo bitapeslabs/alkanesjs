@@ -239,6 +239,12 @@ export function evalNum(
     const [a, b] = o.xor as [unknown, unknown];
     return evalNum(a, ctx, varVal) ^ evalNum(b, ctx, varVal);
   }
+  if ("nif" in o) {
+    const n = obj(o.nif);
+    return evalBool(n.cond, ctx, varVal)
+      ? evalNum(n.then, ctx, varVal)
+      : evalNum(n.else, ctx, varVal);
+  }
 
   throw new Error(`plan: unrecognized num expr: ${JSON.stringify(expr)}`);
 }
@@ -414,6 +420,13 @@ function collectNum(expr: unknown, c: Collector, varVal: bigint | undefined): vo
       collectNum(b, c, varVal);
       return;
     }
+  }
+  if ("nif" in o) {
+    const n = o.nif as Record<string, unknown>;
+    collectBool(n.cond, c, varVal);
+    collectNum(n.then, c, varVal);
+    collectNum(n.else, c, varVal);
+    return;
   }
   // num / word / height / var read no storage
 }
