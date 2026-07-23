@@ -23,7 +23,6 @@ const LOOP_LIMIT = 65_536n;
 export interface PlanExpr {
   readonly v: number;
   readonly expr: unknown;
-  readonly trials: number;
 }
 
 /** Storage resolver: key bytes → value bytes (zero-length if unset). */

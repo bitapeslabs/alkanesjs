@@ -69,12 +69,17 @@ export interface AlkabiMethodDef {
 export interface AlkabiPlan {
   readonly v: number;
   readonly expr: unknown;
-  readonly trials: number;
 }
 
 export interface AlkabiDocument {
   readonly alkabi: number;
   readonly contract: string;
+  /**
+   * Randomized differential-trial count every plan in this document survived
+   * against the bytecode. Uniform across plans, so recorded once here rather
+   * than on each method's plan. Absent when the document carries no plans.
+   */
+  readonly trials?: number;
   readonly types: { readonly [name: string]: AlkabiSchemaDef };
   readonly methods: readonly AlkabiMethodDef[];
 }
