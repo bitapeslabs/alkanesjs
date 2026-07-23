@@ -68,6 +68,23 @@ export function isFetchDebugEnabled(): boolean {
   return debugEnabled;
 }
 
+/**
+ * Log something that isn't an HTTP request under the same switch and styling as
+ * `[CALL]` — used by the contract-wasm runtime, whose host imports drive the
+ * RPC rather than issuing it directly, so `provider.debug` shows what the
+ * contract asked for alongside the calls that answered it.
+ */
+export function debugEvent(tag: string, line: string, detail?: string): void {
+  if (!debugEnabled) return;
+  try {
+    let out = chalk.bold.magenta(`[${tag}]`) + " " + line;
+    if (detail) out += "\n" + chalk.gray(detail);
+    console.log(out);
+  } catch {
+    /* logging must never break the caller */
+  }
+}
+
 function requestUrl(input: unknown): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();

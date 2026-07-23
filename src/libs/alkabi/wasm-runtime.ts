@@ -24,7 +24,7 @@
   `new Provider({ debug: true })` logs them like any other call.
 ──────────────────────────────────────────────────────────────*/
 
-import { isFetchDebugEnabled } from "@/debug";
+import { debugEvent } from "@/debug";
 
 export interface AlkaneIdLike {
   block: bigint | number | string;
@@ -51,6 +51,18 @@ export interface WasmViewOptions {
 }
 
 const EMPTY = new Uint8Array(0);
+
+/** Storage keys are a readable keyword followed by binary, so show both. */
+function describeKey(key: Uint8Array): string {
+  let text = "";
+  let i = 0;
+  while (i < key.length && key[i] >= 0x20 && key[i] < 0x7f) {
+    text += String.fromCharCode(key[i]);
+    i++;
+  }
+  const rest = key.subarray(i);
+  return rest.length ? `${text}+${bytesToHex(rest)}` : text || bytesToHex(key);
+}
 
 export function bytesToHex(bytes: Uint8Array): string {
   let s = "";
@@ -222,13 +234,17 @@ function runOnce(
     return bytes.length;
   };
 
-  const lookup = (key: Uint8Array): Uint8Array => {
+  // `via` is the import that asked — the contract reads a key twice, once for
+  // its length and once for its bytes
+  const lookup = (key: Uint8Array, via: string): Uint8Array => {
     const hex = bytesToHex(key);
     const held = storage.get(hex);
     if (held === undefined) {
       misses.add(hex);
+      debugEvent("HOST", `${via} ${describeKey(key)} → not held yet`);
       return EMPTY;
     }
+    debugEvent("HOST", `${via} ${describeKey(key)} → ${held.length} bytes`);
     return held;
   };
 
@@ -238,8 +254,10 @@ function runOnce(
   const host: Record<string, (...a: number[]) => number | void> = {
     __request_context: () => context.length,
     __load_context: (ptr) => write(ptr, context),
-    __request_storage: (ptr) => lookup(lenPrefixed(ptr)).length,
-    __load_storage: (keyPtr, outPtr) => write(outPtr, lookup(lenPrefixed(keyPtr))),
+    __request_storage: (ptr) =>
+      lookup(lenPrefixed(ptr), "__request_storage").length,
+    __load_storage: (keyPtr, outPtr) =>
+      write(outPtr, lookup(lenPrefixed(keyPtr), "__load_storage")),
     __height: (ptr) => write(ptr, u64le(height)),
     __sequence: (ptr) => write(ptr, u128le(0n)),
     __fuel: (ptr) => write(ptr, u64le(0n)),
@@ -289,12 +307,14 @@ export async function runWasmView(o: WasmViewOptions): Promise<Uint8Array> {
 
   for (let round = 0; round < maxRounds; round++) {
     const { data, error, misses } = runOnce(module, context, o.height, storage);
-    if (isFetchDebugEnabled()) {
-      console.log(
-        `[wasm-view] round ${round}: ${misses.size} key(s) missing` +
-          (error ? ` (run trapped: ${(error as Error).message})` : ""),
-      );
-    }
+    debugEvent(
+      "WASM",
+      error
+        ? `run ${round}: ${(error as Error).message}`
+        : misses.size
+          ? `run ${round}: needs ${misses.size} more key(s), re-running`
+          : `run ${round}: answered from ${storage.size} key(s)`,
+    );
 
     // A run that wanted nothing it didn't have saw the real storage, so its
     // outcome is the true one — whether that's an answer or a genuine failure.
