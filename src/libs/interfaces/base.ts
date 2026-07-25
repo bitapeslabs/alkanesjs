@@ -32,6 +32,15 @@ import {
   type ViewCallOptions,
 } from "../alkabi/wasm-runtime";
 
+/** One entry of a view bundle — everything needed to encode and decode it. */
+export interface BundledViewCall {
+  name: string;
+  opcode: bigint;
+  arg: unknown;
+  inShape: unknown;
+  outShape: unknown;
+}
+
 export enum AlkanesSimulationError {
   UnknownError = "UnknownError",
   TransactionReverted = "Revert",
@@ -114,6 +123,26 @@ export abstract class AlkanesBaseContract {
       : encoder.encodeFrom(shape as keyof EncoderFns<unknown>);
 
     return bigintArrayResponse;
+  }
+
+  /**
+   * Encode a call's argument into the u128 words a protostone message carries.
+   * The transaction builder writes the cellpack; the contract owns the shapes,
+   * so the encoding stays here.
+   */
+  public encodeCalldata<I extends Schema>(
+    arg: ResolveSchema<I>,
+    inShape: I,
+  ): BoxedResponse<bigint[], EncodeError> {
+    return this.getEncodedCallData(arg, inShape);
+  }
+
+  /** Decode returndata with a method's declared output shape. */
+  public decodeReturn<O extends Schema>(
+    bytes: Uint8Array,
+    outShape: O,
+  ): ResolveSchema<O> {
+    return consumeOrThrow(this.getDecodedResponse(bytes, outShape));
   }
 
   private getDecodedResponse<O extends Schema>(
@@ -257,6 +286,8 @@ export abstract class AlkanesBaseContract {
           const result = await this.provider.rpc.espo.getKeys(alkaneStr, {
             keys: keys.map((k) => "0x" + bytesToHex(k)),
             try_decode_utf8: false,
+            // espo defaults its limit to 100 — a long key list loses its tail
+            limit: Math.max(keys.length, 1),
           });
           if (result.isErr()) throw new Error("espo get_keys failed");
           const out = new Map<string, Uint8Array>();
@@ -277,6 +308,142 @@ export abstract class AlkanesBaseContract {
       // any failure → fall back to the authoritative simulate path
       return this.handleView(opcode, arg, inShape, outShape);
     }
+  }
+
+  /**
+   * Execute a set of view calls as ONE JSON-RPC batch. Each entry is encoded
+   * to an `alkanes_simulate`, the whole array goes out in a single HTTP
+   * request, and each response decodes with its own output shape.
+   *
+   * Nothing here throws and nothing is unwrapped: every entry resolves to its
+   * own `BoxedResponse`, exactly as awaiting that view individually would, so
+   * each result is handled on its own terms — `.unwrap()`, `.unwrapOr(x)`,
+   * `.isErr()`, whatever that call deserves. One reverted view doesn't cost
+   * the others their results.
+   *
+   * Heights are sent as `0`: kirby substitutes its espo tip, so the batch
+   * needs no height pre-fetch. Pointing this at a raw metashrew instead of a
+   * kirby will simulate at height 0 — this path is designed for kirby.
+   */
+  public async handleViewBundle(
+    calls: BundledViewCall[],
+  ): Promise<BoxedResponse<unknown, AlkanesSimulationError>[]> {
+    const results: (BoxedResponse<unknown, AlkanesSimulationError> | undefined)[] =
+      new Array(calls.length).fill(undefined);
+
+    // Encode first. An entry that can't encode becomes its own error and the
+    // rest of the batch still ships.
+    const entries: { call: BundledViewCall; index: number; body: unknown }[] = [];
+    calls.forEach((c, index) => {
+      const words = this.getEncodedCallData(c.arg as never, c.inShape as never);
+      if (isBoxedError(words)) {
+        results[index] = new BoxedError(
+          `${c.name}: ${words.message ?? "encoding failed"}`,
+          AlkanesSimulationError.UnknownError,
+        );
+        return;
+      }
+      entries.push({
+        call: c,
+        index,
+        body: {
+          jsonrpc: "2.0",
+          id: index,
+          method: "alkanes_simulate",
+          params: [
+            {
+              alkanes: [],
+              transaction: "0x",
+              block: "0x",
+              height: "0",
+              txindex: 0,
+              target: {
+                block: this.alkaneId.block.toString(),
+                tx: this.alkaneId.tx.toString(),
+              },
+              inputs: [c.opcode.toString(), ...words.data.map((w) => w.toString())],
+              pointer: 0,
+              refundPointer: 0,
+              vout: 0,
+            },
+          ],
+        },
+      });
+    });
+
+    if (entries.length > 0) {
+      try {
+        const res = await fetch(this.provider.sandshrewUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entries.map((e) => e.body)),
+        });
+        const body = (await res.json()) as Array<{
+          id: number;
+          result?: { execution?: { data?: string; error?: string | null } };
+          error?: { message?: string };
+        }>;
+        if (!Array.isArray(body)) {
+          throw new Error("expected a batch response array");
+        }
+        const byId = new Map(body.map((r) => [r.id, r]));
+
+        for (const { call, index } of entries) {
+          const r = byId.get(index);
+          if (!r) {
+            results[index] = new BoxedError(
+              `${call.name}: no response in batch`,
+              AlkanesSimulationError.UnknownError,
+            );
+            continue;
+          }
+          if (r.error) {
+            results[index] = new BoxedError(
+              `${call.name}: ${r.error.message ?? "rpc error"}`,
+              AlkanesSimulationError.UnknownError,
+            );
+            continue;
+          }
+          const exec = r.result?.execution;
+          if (!exec) {
+            results[index] = new BoxedError(
+              `${call.name}: malformed simulate response`,
+              AlkanesSimulationError.UnknownError,
+            );
+            continue;
+          }
+          if (exec.error) {
+            results[index] = new BoxedError(
+              `${call.name}: ${exec.error}`,
+              AlkanesSimulationError.TransactionReverted,
+            );
+            continue;
+          }
+          const decoded = this.getDecodedResponse(
+            hexFromEspo(exec.data),
+            call.outShape as never,
+          );
+          results[index] = isBoxedError(decoded)
+            ? new BoxedError(
+                `${call.name}: ${decoded.message ?? "decode failed"}`,
+                AlkanesSimulationError.UnknownError,
+              )
+            : new BoxedSuccess(decoded.data as unknown);
+        }
+      } catch (error) {
+        // transport-level failure: every still-pending entry fails, boxed
+        for (const { call, index } of entries) {
+          if (results[index] === undefined) {
+            results[index] = new BoxedError(
+              `${call.name}: bundle transport failed: ${(error as Error).message}`,
+              AlkanesSimulationError.UnknownError,
+            );
+          }
+        }
+      }
+    }
+
+    return results as BoxedResponse<unknown, AlkanesSimulationError>[];
   }
 
   public async handleExecute<

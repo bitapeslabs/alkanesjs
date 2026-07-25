@@ -39,7 +39,11 @@ function colorLevel(): 0 | 1 | 2 | 3 {
 
 const chalk = new Chalk({ level: colorLevel() });
 
-let debugEnabled = false;
+/**
+ * 0 — silent. 1 — one line per outgoing request: transport, URL, the rpc
+ * method(s) inside it, and how long it took. 2 — the JSON body as well.
+ */
+let debugLevel = 0;
 let installed = false;
 
 /** Pretty-print a request body: indented JSON when parseable, else as-is. */
@@ -58,14 +62,19 @@ function formatBody(body: string): string {
   return body;
 }
 
-/** Turn fetch-call logging on or off (installs the wrapper on first enable). */
-export function setFetchDebug(enabled: boolean): void {
-  debugEnabled = enabled;
-  if (enabled) installFetchLogger();
+/** Set the logging level (installs the wrapper on first enable). Booleans are
+ *  accepted for old callers: `true` means the old full-body behavior (2). */
+export function setFetchDebug(level: number | boolean): void {
+  debugLevel = typeof level === "boolean" ? (level ? 2 : 0) : Math.max(0, level);
+  if (debugLevel > 0) installFetchLogger();
 }
 
 export function isFetchDebugEnabled(): boolean {
-  return debugEnabled;
+  return debugLevel > 0;
+}
+
+export function fetchDebugLevel(): number {
+  return debugLevel;
 }
 
 /**
@@ -75,7 +84,7 @@ export function isFetchDebugEnabled(): boolean {
  * contract asked for alongside the calls that answered it.
  */
 export function debugEvent(tag: string, line: string, detail?: string): void {
-  if (!debugEnabled) return;
+  if (debugLevel < 2) return;
   try {
     let out = chalk.bold.magenta(`[${tag}]`) + " " + line;
     if (detail) out += "\n" + chalk.gray(detail);
@@ -117,6 +126,32 @@ async function requestBody(input: unknown, init: unknown): Promise<string> {
   return "";
 }
 
+/**
+ * The rpc method name(s) inside a request — `method` of a JSON-RPC body,
+ * comma-joined for a batch; the URL path for plain REST calls.
+ */
+function rpcMethodNames(body: string, url: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    if (Array.isArray(parsed)) {
+      const names = parsed
+        .map((e) => (e && typeof e === "object" ? String(e.method ?? "?") : "?"))
+        .join(",");
+      return `[${names}]`;
+    }
+    if (parsed && typeof parsed === "object" && parsed.method) {
+      return String(parsed.method);
+    }
+  } catch {
+    /* not JSON — fall through to the path */
+  }
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return "";
+  }
+}
+
 function installFetchLogger(): void {
   if (installed) return;
   installed = true;
@@ -125,27 +160,52 @@ function installFetchLogger(): void {
   const original = g.fetch.bind(globalThis);
 
   g.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (debugEnabled) {
-      try {
-        const url = requestUrl(input);
-        const body = await requestBody(input, init);
-        const method =
-          (init && typeof init === "object" && (init as RequestInit).method) ||
-          "GET";
-        let line =
-          chalk.bold.cyan("[CALL]") +
-          " " +
-          chalk.dim(method.toUpperCase()) +
-          " " +
-          chalk.underline.blue(url);
-        if (body) {
-          line += "\n" + chalk.gray(formatBody(body));
-        }
-        console.log(line);
-      } catch {
-        /* logging must never break the request */
-      }
+    if (debugLevel === 0) return original(input, init);
+
+    // gather what we can up front; logging must never break the request
+    let url = "";
+    let body = "";
+    let http = "GET";
+    try {
+      url = requestUrl(input);
+      body = await requestBody(input, init);
+      http = (
+        (init && typeof init === "object" && (init as RequestInit).method) ||
+        "GET"
+      ).toUpperCase();
+    } catch {
+      /* leave the placeholders */
     }
-    return original(input, init);
+
+    const started = Date.now();
+    const emit = (outcome: string) => {
+      try {
+        console.log(
+          chalk.bold.cyan("[CALL]") +
+            " " +
+            chalk.dim(http) +
+            " " +
+            chalk.underline.blue(url) +
+            " " +
+            chalk.magenta(rpcMethodNames(body, url)) +
+            " " +
+            outcome,
+        );
+        if (debugLevel >= 2 && body) {
+          console.log(chalk.gray(formatBody(body)));
+        }
+      } catch {
+        /* never break the request */
+      }
+    };
+
+    try {
+      const response = await original(input, init);
+      emit(chalk.gray(`${Date.now() - started}ms`));
+      return response;
+    } catch (error) {
+      emit(chalk.red(`failed after ${Date.now() - started}ms`));
+      throw error;
+    }
   }) as typeof fetch;
 }

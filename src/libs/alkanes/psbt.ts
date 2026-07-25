@@ -451,6 +451,13 @@ export class ProtostoneTransaction {
     */
     protostones?: ProtostoneSpec[];
 
+    /*
+      Shared across every transaction of one block (and across a transaction's
+      own measure/build passes): an address's spendable outpoints are fetched
+      once rather than once per pass. Leave it undefined to fetch every time.
+    */
+    spendableCache?: Map<string, Promise<FormattedUtxo[]>>;
+
     ignoreAlkanesUtxoCheck?: boolean; // If true, it will not check if the alkanes UTXOs are sufficient
 
     //If etching or mint are included, a new output will be created to collect the alkanes
@@ -538,6 +545,7 @@ export class ProtostoneTransaction {
       ignoreAlkanesRequirementCheck:
         options.ignoreAlkanesRequirementCheck ?? false,
       ignoreAlkanesUtxoCheck: options.ignoreAlkanesUtxoCheck ?? false,
+      spendableCache: options.spendableCache,
       transfers: options.transfers ?? [],
       callData: options.callData ?? [],
       excludeProtostone: options.excludeProtostone ?? false,
@@ -644,7 +652,7 @@ export class ProtostoneTransaction {
     };
   }
 
-  private async fetchSpendableUtxos(address: string): Promise<FormattedUtxo[]> {
+  private async loadSpendableUtxos(address: string): Promise<FormattedUtxo[]> {
     const spendableOutpoints = consumeOrThrow(
       await this.espo_getAddressSpendableOutpoints(address, {
         omitRawTx: false,
@@ -654,6 +662,27 @@ export class ProtostoneTransaction {
     return spendableOutpoints.outpoints.map((outpoint) =>
       this.formatEspoSpendableOutpoint(spendableOutpoints.address, outpoint),
     );
+  }
+
+  /*
+    What an address can spend doesn't change while a block is being assembled,
+    but every transaction is built twice — once to measure it, once for real —
+    and a block builds many. Left alone that is one identical round trip per
+    pass per address. A caller that knows the answer is stable for the whole
+    build hands in a cache; without one nothing is shared and the behaviour is
+    exactly what it was.
+
+    The cache holds the in-flight promise, not the result, so concurrent passes
+    coalesce onto one request. Callers only ever read filtered copies of what
+    comes back, so the shared array is never mutated.
+  */
+  private fetchSpendableUtxos(address: string): Promise<FormattedUtxo[]> {
+    const cache = this.transactionOptions.spendableCache;
+    const inFlight = cache?.get(address);
+    if (inFlight) return inFlight;
+    const pending = this.loadSpendableUtxos(address);
+    cache?.set(address, pending);
+    return pending;
   }
 
   private async fetchResources(): Promise<void> {
@@ -753,7 +782,6 @@ export class ProtostoneTransaction {
         (this.transactionOptions.transfers?.length ?? 0) +
       this.MINIMUM_PROTOCOL_DUST;
 
-    console.log(this.cumulativeSpendRequirementBtc);
 
     this.cumulativeSpendRequirementAlkanes =
       this.transactionOptions.transfers.reduce(
@@ -1178,7 +1206,6 @@ export class ProtostoneTransaction {
         })),
     );
 
-    console.log(transactionEdicts[0]);
 
     return transactionEdicts;
   }

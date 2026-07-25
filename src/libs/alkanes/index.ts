@@ -79,3 +79,4 @@ export const execute = async ({
 export * from "./types";
 export * from "./utils";
 export * from "./psbt";
+export * from "./account";
