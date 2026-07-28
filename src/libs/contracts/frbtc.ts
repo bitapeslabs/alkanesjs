@@ -93,7 +93,7 @@ const cannotSign = async (): Promise<string> => {
 export const frbtcContract = (
   provider: Provider,
   frbtcId: AlkaneId = FRBTC_ALKANE_ID,
-): FrBtcContract => new FrBtcContract(provider, frbtcId, cannotSign);
+): FrBtcContract => new FrBtcContract({ provider, sign: cannotSign }, frbtcId);
 
 /**
  * The signer's `script_pubkey`, resolved LIVE from espo's `subfrost.get_signer`

@@ -1,7 +1,7 @@
 /*─────────────────────────────────────────────────────────────
   ALKANES CONTRACT FROM AN ALKABI DOCUMENT
   -----------------------------------------------------------
-  `new AlkanesContract(MyAbi, { provider, alkaneId, signPsbt })`
+  `new Contract(MyAbi, alkaneId, provider?)`
   yields the same interface a hand-written alkanesjs ABI gives:
   fully-typed view/execute methods, straight from the `as const`
   abi.ts literal — zero codegen.
@@ -90,17 +90,23 @@ export function specFromAlkabi(
 ) {
   const spec: Record<string, any> = {};
 
+  /*
+    Every method wires as a view call, whatever its declared kind. Simulation
+    is just asking — an "execute" method answers a simulate exactly as it
+    would answer the indexer, so there is no reason a caller should have to
+    override its kind to ask. WRITING is not done here at all: a real call is
+    a transaction (`account.tx().call(contract, ...)`), signed by the account
+    that makes it — a contract is not a signing authority.
+
+    A witness-carrying method simulates on its calldata alone; the witness
+    rides the transaction envelope, which a bare simulate does not have.
+  */
   for (const method of document.methods) {
     const opcode = BigInt(method.opcode);
     const input = inputShape(method.input, document.types);
     const output = outputShape(method.output, document.types);
 
-    if (method.kind === "view") {
-      if (method.witness) {
-        throw new Error(
-          `alkabi: view method "${method.name}" cannot carry a witness payload`,
-        );
-      }
+    {
       const viewSpec: any = abi
         .opcode(opcode)
         .view(input as any)
@@ -128,17 +134,6 @@ export function specFromAlkabi(
       }
 
       spec[method.name] = viewSpec;
-    } else {
-      const inscription = method.witness
-        ? (buildBorshSchema(
-            method.witness.schema,
-            document.types,
-          ) as BorshSchema<any>)
-        : undefined;
-      spec[method.name] = abi
-        .opcode(opcode)
-        .execute(input as any, inscription as any)
-        .returns(output as any);
     }
   }
 
@@ -160,36 +155,15 @@ type ViewFn<M, T extends AlkabiTypes> = M extends { input: infer I }
     ) => BoxedPromise<OutOf<M, T>, AlkanesSimulationError>
   : (opts?: ViewCallOptions) => BoxedPromise<OutOf<M, T>, AlkanesSimulationError>;
 
-type ExecuteTail<M, T extends AlkabiTypes> = M extends { input: infer I }
-  ? M extends { witness: infer W }
-    ? [input: InferAlkabiIo<I, T>, witness: InferAlkabiIo<W, T>]
-    : [input: InferAlkabiIo<I, T>]
-  : M extends { witness: infer W }
-    ? [witness: InferAlkabiIo<W, T>]
-    : [];
-
-type ExecuteFn<M, T extends AlkabiTypes> = (
-  address: string,
-  ...args: [...ExecuteTail<M, T>, txOpts?: ProtostoneTransactionOptionsPartial]
-) => BoxedPromise<
-  AlkanesPushExecuteResponse<OutOf<M, T>>,
-  AlkanesExecuteError
->;
-
 export type AlkabiMethodMap<D extends AlkabiDocument> = {
-  [M in D["methods"][number] as M["name"]]: M["kind"] extends "view"
-    ? ViewFn<M, D["types"]>
-    : ExecuteFn<M, D["types"]>;
+  [M in D["methods"][number] as M["name"]]: ViewFn<M, D["types"]>;
 };
 
 /*------------------------------------------------------------*
- | 3.  AlkanesContract                                         |
+ | 3.  Contract                                                |
  *------------------------------------------------------------*/
 
-export interface AlkanesContractOptions {
-  provider: Provider;
-  alkaneId: AlkaneId;
-  signPsbt: (unsigned: string) => Promise<string>;
+export interface ContractOptions {
   /**
    * The contract's own wasm. Supply it and view methods are answered by running
    * the contract locally against storage read from espo, instead of by asking
@@ -205,10 +179,8 @@ export interface AlkanesContractOptions {
  | View bundles — many calls, one JSON-RPC batch               |
  *------------------------------------------------------------*/
 
-type ViewDef<D extends AlkabiDocument> = Extract<
-  D["methods"][number],
-  { kind: "view" }
->;
+// every method is bundleable — simulation does not care about declared kind
+type ViewDef<D extends AlkabiDocument> = D["methods"][number];
 
 type Boxed<Out> = BoxedResponse<Out, AlkanesSimulationError>;
 
@@ -265,7 +237,7 @@ export type ViewBundle<
     send(): Promise<Acc>;
   };
 
-export type AlkanesContractInstance<D extends AlkabiDocument> =
+export type ContractInstance<D extends AlkabiDocument> =
   AlkanesBaseContract &
   AlkabiMethodMap<D> & {
     /** Start a view bundle — chain calls, await once, get a typed tuple. */
@@ -342,8 +314,39 @@ class AlkanesContractImpl extends AlkanesBaseContract {
     return this.opcodeTable;
   }
 
-  constructor(document: AlkabiDocument, options: AlkanesContractOptions) {
-    super(options.provider, options.alkaneId, options.signPsbt);
+  constructor(
+    document: AlkabiDocument,
+    alkaneId: AlkaneId,
+    provider?: Provider,
+    options: ContractOptions = {},
+  ) {
+    /*
+      A contract with no provider is a pure descriptor — enough to write its
+      calls into a transaction, since `account.tx().call(pool, …)` only ever
+      encodes. Asking it something directly needs somewhere to ask, so the
+      provider is required lazily, at the moment of the first direct call.
+      Signing is nobody's business here at all: a transaction is signed by
+      the account that builds it.
+    */
+    super(
+      {
+        get provider(): Provider {
+          if (!provider) {
+            throw new Error(
+              "Contract: not connected — pass a provider (`new Contract(abi, id, provider)`) " +
+                "to call views directly; building transactions needs none",
+            );
+          }
+          return provider;
+        },
+        sign: async () => {
+          throw new Error(
+            "a contract never signs — transactions are signed by the account that builds them",
+          );
+        },
+      },
+      alkaneId,
+    );
     const spec = specFromAlkabi(document, options.wasm);
     this.opcodeTable = buildOpcodeTable(spec);
     wireMethods(this, spec);
@@ -357,7 +360,8 @@ class AlkanesContractImpl extends AlkanesBaseContract {
         outShape: outputShape(method.output, document.types),
       };
       this.methodMeta[method.name] = meta;
-      if (method.kind === "view") this.viewMeta[method.name] = meta;
+      // every method is bundleable — simulation does not care about kind
+      this.viewMeta[method.name] = meta;
     }
   }
 
@@ -438,9 +442,11 @@ class AlkanesContractImpl extends AlkanesBaseContract {
   }
 }
 
-export const AlkanesContract = AlkanesContractImpl as unknown as {
+export const Contract = AlkanesContractImpl as unknown as {
   new <const D extends AlkabiDocument>(
     document: D,
-    options: AlkanesContractOptions,
-  ): AlkanesContractInstance<D>;
+    alkaneId: AlkaneId,
+    provider?: Provider,
+    options?: ContractOptions,
+  ): ContractInstance<D>;
 };

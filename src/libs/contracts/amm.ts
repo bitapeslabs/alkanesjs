@@ -243,7 +243,8 @@ export class AmmFactoryContract extends abi.attach(
 export const ammFactoryContract = (
   provider: Provider,
   factoryId: AlkaneId,
-): AmmFactoryContract => new AmmFactoryContract(provider, factoryId, cannotSign);
+): AmmFactoryContract =>
+  new AmmFactoryContract({ provider, sign: cannotSign }, factoryId);
 
 export const AmmPoolABI = abi.contract({
   /** fee per 1000 — 10 == 1.0% */
@@ -273,7 +274,7 @@ export class AmmPoolContract extends abi.attach(
 export const ammPoolContract = (
   provider: Provider,
   poolId: AlkaneId,
-): AmmPoolContract => new AmmPoolContract(provider, poolId, cannotSign);
+): AmmPoolContract => new AmmPoolContract({ provider, sign: cannotSign }, poolId);
 
 /*───────────────────────────── decode helpers ───────────────────────────────*/
 

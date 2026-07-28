@@ -8,6 +8,16 @@ import {
 } from "@/boxed";
 import { AlkaneId } from "@/apis";
 import { Provider } from "@/provider";
+/**
+ * What a contract needs from whoever holds it: a provider to ask through and
+ * a signing authority to defer to. Every `AlkanesAccount` satisfies this —
+ * a `ViewAccount` by refusing to sign — and the legacy read-only factories
+ * satisfy it with an inline refuser.
+ */
+export interface ContractHost {
+  provider: Provider;
+  sign(unsigned: string): Promise<string>;
+}
 
 import {
   AlkanesExecuteError,
@@ -71,11 +81,20 @@ function hexFromEspo(valueHex: string | undefined): Uint8Array {
 
 export abstract class AlkanesBaseContract {
   constructor(
-    protected readonly provider: Provider,
+    /**
+     * Whose provider the contract asks through — and, for the legacy execute
+     * path below, whose signing authority a write defers to. A `ViewAccount`
+     * serves every read; only the deprecated direct-execute path ever asks it
+     * to sign, and a view-only account answers that by refusing.
+     */
+    protected readonly account: ContractHost,
     public readonly alkaneId: AlkaneId,
-    private readonly signPsbtFn: (unsigned: string) => Promise<string>,
   ) {}
   protected abstract get OpCodes(): OpcodeTable;
+
+  protected get provider(): Provider {
+    return this.account.provider;
+  }
 
   /*─────────────── thin helpers around Provider ───────────────*/
   protected get rpc() {
@@ -90,7 +109,7 @@ export abstract class AlkanesBaseContract {
   }
 
   public get signPsbt() {
-    return this.signPsbtFn.bind(this);
+    return (unsigned: string) => this.account.sign(unsigned);
   }
 
   public simulate(

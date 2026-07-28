@@ -63,6 +63,10 @@ import {
   toEsploraTx,
   tweakSigner,
 } from "./utils";
+import { sleep } from "@/utils";
+import * as bip39 from "bip39";
+import { BIP32Factory } from "bip32";
+import { ecc } from "@/crypto/ecc";
 
 /*------------------------------------------------------------*
  | What a contract has to expose to be callable from a tx      |
@@ -90,60 +94,32 @@ export interface CallableContract<D = unknown> {
  | Account                                                     |
  *------------------------------------------------------------*/
 
-export interface AlkanesAccountOptions {
-  provider: Provider;
-  /**
-   * The address(es) this account spends from. Pass a single string to use one
-   * address for both BTC and alkanes, or `{ paymentAddress, assetAddress }` to
-   * hold assets somewhere other than where the sats come from.
-   *
-   * Omit it when `wif` is given — the taproot address is derived from the key.
-   */
-  address?: TransactionAddressInput;
-  /** A private key, in WIF. Its transactions come out signed. */
-  wif?: string;
-  /**
-   * An external signer (a browser wallet). Takes an unsigned psbt in base64 and
-   * returns a signed one. Supersedes `wif` when both are given.
-   */
-  signPsbt?: (unsigned: string) => Promise<string>;
+/** Options shared by every account: whose provider, and what fee it pays. */
+export interface AccountOptions {
   /** Overrides the provider's default for every transaction this account makes. */
   feeRate?: number;
 }
 
 /**
- * Someone who can spend. Holds the addresses transactions are built from and,
- * when it has a key, the ability to sign them.
+ * Someone who can spend — or at least ask. Holds the addresses transactions
+ * are built from, and the provider they are asked through. This is the base
+ * both kinds share; you never construct one directly:
+ *
+ *   `Account`  — holds signing authority (a key, or an external signer),
+ *                     so its transactions come out with real signatures.
+ *   `ViewAccount`   — an address you watch. It builds and simulates the same
+ *                     transactions with placeholder witnesses — nothing in a
+ *                     simulation checks a signature — but it cannot sign.
  */
-export class AlkanesAccount {
-  readonly provider: Provider;
+export abstract class AlkanesAccount {
   readonly addresses: TransactionAddresses;
-  readonly feeRate?: number;
 
-  private readonly keypair?: ReturnType<typeof EcPair.fromWIF>;
-  private readonly externalSigner?: (unsigned: string) => Promise<string>;
-
-  constructor(options: AlkanesAccountOptions) {
-    this.provider = options.provider;
-    this.feeRate = options.feeRate;
-    this.externalSigner = options.signPsbt;
-
-    if (options.wif) {
-      this.keypair = EcPair.fromWIF(options.wif, options.provider.network);
-    }
-
-    const derived = this.keypair
-      ? bitcoin.payments.p2tr({
-          internalPubkey: toXOnly(Buffer.from(this.keypair.publicKey)),
-          network: options.provider.network,
-        }).address
-      : undefined;
-
-    const given = options.address ?? derived;
-    if (!given) {
-      throw new Error("AlkanesAccount: needs an address or a wif");
-    }
-    this.addresses = normalizeTransactionAddresses(given);
+  protected constructor(
+    readonly provider: Provider,
+    addresses: TransactionAddressInput,
+    readonly feeRate?: number,
+  ) {
+    this.addresses = normalizeTransactionAddresses(addresses);
   }
 
   /** Where this account's sats come from — and where change goes back to. */
@@ -157,24 +133,124 @@ export class AlkanesAccount {
   }
 
   /** Whether transactions from this account come out with real signatures. */
-  get canSign(): boolean {
-    return Boolean(this.keypair || this.externalSigner);
+  abstract get canSign(): boolean;
+
+  /** Sign an unsigned psbt. Throws for an account with no signing authority. */
+  abstract sign(unsignedBase64: string): Promise<string>;
+
+  /** Start a transaction spending from this account. */
+  tx(): AlkaneTx {
+    return new AlkaneTx(this);
+  }
+}
+
+/**
+ * An address you can watch but not spend from. Everything except signing
+ * works: simulation never verifies a witness, so a ViewAccount can build a
+ * transaction, ask what it would do, even hand its outputs to another
+ * transaction in a simulated block — it just can't put the result on chain.
+ */
+export class ViewAccount extends AlkanesAccount {
+  static fromAddress(
+    address: TransactionAddressInput,
+    provider: Provider,
+    options: AccountOptions = {},
+  ): ViewAccount {
+    return new ViewAccount(provider, address, options.feeRate);
   }
 
-  /** Sign an unsigned psbt. Throws for an account with no key. */
+  get canSign(): boolean {
+    return false;
+  }
+
+  async sign(): Promise<string> {
+    throw new Error(
+      `ViewAccount(${this.address}): view-only — it holds no key to sign with`,
+    );
+  }
+}
+
+/**
+ * An account with signing authority: a key it holds, or an external signer
+ * (a browser wallet) it defers to. Its transactions are finalized with real
+ * signatures, which is what makes them broadcastable.
+ */
+export class Account extends AlkanesAccount {
+  private constructor(
+    provider: Provider,
+    addresses: TransactionAddressInput,
+    private readonly keypair?: ReturnType<typeof EcPair.fromWIF>,
+    private readonly externalSigner?: (unsigned: string) => Promise<string>,
+    feeRate?: number,
+  ) {
+    super(provider, addresses, feeRate);
+  }
+
+  /** From a private key in WIF. The taproot address is derived from it. */
+  static fromWIF(
+    wif: string,
+    provider: Provider,
+    options: AccountOptions = {},
+  ): Account {
+    const keypair = EcPair.fromWIF(wif, provider.network);
+    const address = bitcoin.payments.p2tr({
+      internalPubkey: toXOnly(Buffer.from(keypair.publicKey)),
+      network: provider.network,
+    }).address!;
+    return new Account(provider, address, keypair, undefined, options.feeRate);
+  }
+
+  /**
+   * From a BIP39 mnemonic, derived at `path` — BIP86's first taproot key by
+   * default (`m/86'/0'/0'/0/0`).
+   */
+  static fromMnemonic(
+    mnemonic: string,
+    provider: Provider,
+    options: AccountOptions & { path?: string } = {},
+  ): Account {
+    if (!bip39.validateMnemonic(mnemonic)) {
+      throw new Error("Account.fromMnemonic: not a valid BIP39 mnemonic");
+    }
+    const seed = bip39.mnemonicToSeedSync(mnemonic);
+    const node = BIP32Factory(ecc)
+      .fromSeed(seed, provider.network)
+      .derivePath(options.path ?? "m/86'/0'/0'/0/0");
+    const keypair = EcPair.fromPrivateKey(Buffer.from(node.privateKey!), {
+      network: provider.network,
+    });
+    const address = bitcoin.payments.p2tr({
+      internalPubkey: toXOnly(Buffer.from(keypair.publicKey)),
+      network: provider.network,
+    }).address!;
+    return new Account(provider, address, keypair, undefined, options.feeRate);
+  }
+
+  /**
+   * From an external signer — a browser wallet. The wallet holds the key, so
+   * the address cannot be derived and has to be given.
+   */
+  static fromSignPsbt(
+    signPsbt: (unsigned: string) => Promise<string>,
+    address: TransactionAddressInput,
+    provider: Provider,
+    options: AccountOptions = {},
+  ): Account {
+    return new Account(provider, address, undefined, signPsbt, options.feeRate);
+  }
+
+  get canSign(): boolean {
+    return true;
+  }
+
   async sign(unsignedBase64: string): Promise<string> {
     if (this.externalSigner) {
       return this.externalSigner(unsignedBase64);
     }
-    if (!this.keypair) {
-      throw new Error(
-        `AlkanesAccount(${this.address}): view-only — it holds no key to sign with`,
-      );
-    }
     const psbt = bitcoin.Psbt.fromBase64(unsignedBase64, {
       network: this.provider.network,
     });
-    const tweaked = tweakSigner(this.keypair, {
+    const tweaked = tweakSigner(this.keypair!, {
       network: this.provider.network,
     });
     psbt.data.inputs.forEach((input, index) => {
@@ -184,11 +260,6 @@ export class AlkanesAccount {
     });
     psbt.finalizeAllInputs();
     return psbt.toBase64();
-  }
-
-  /** Start a transaction spending from this account. */
-  tx(): AlkaneTx {
-    return new AlkaneTx(this);
   }
 }
 
@@ -358,6 +429,16 @@ interface PendingInput {
 export interface BuiltTx {
   hex: string;
   txid: string;
+  /**
+   * Broadcast this transaction — through espo, whose broadcaster hands it to
+   * electrum with a Bitcoin Core fallback — and get the txid plus a
+   * `waitForConfirmation` that resolves once the transaction is mined AND
+   * espo has indexed its block, so anything read afterwards sees its effects.
+   *
+   * Refuses a transaction carrying placeholder witnesses: a `ViewAccount`
+   * builds bytes a simulation accepts, not bytes a node will.
+   */
+  send(): Promise<{ txid: string; waitForConfirmation: () => Promise<void> }>;
   /**
    * What this transaction's own edicts put on each real output. Known because
    * we wrote them — a call's result is not, since only the simulation knows
@@ -703,14 +784,46 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
       transaction = extractWithDummySigs(real.getPsbt());
     }
 
+    const account = this.account;
+    const builtTxid = transaction.getId();
     this.built = {
       hex: transaction.toHex(),
-      txid: transaction.getId(),
+      txid: builtTxid,
       holds,
       home,
       signed,
       psbtBase64: unsigned,
       transaction,
+      async send() {
+        if (!this.signed) {
+          throw new Error(
+            `tx ${builtTxid}: built with placeholder witnesses — a view-only ` +
+              "account cannot send; use an Account that holds the key",
+          );
+        }
+        const sent = await account.provider.rpc.electrum.esplora_broadcastTx(this.hex);
+        if (isBoxedError(sent)) throw new Error(sent.message);
+        const txid = sent.data;
+        const waitForConfirmation = async () => {
+          // mined…
+          let height = 0;
+          for (;;) {
+            const tx = await account.provider.rpc.electrum.esplora_gettransaction(txid);
+            if (!isBoxedError(tx) && tx.data.status?.confirmed) {
+              height = tx.data.status.block_height ?? 0;
+              break;
+            }
+            await sleep(2000);
+          }
+          // …and indexed, so a read after this sees what the transaction did
+          for (;;) {
+            const tip = await account.provider.rpc.espo.getTipHeight();
+            if (!isBoxedError(tip) && tip.data.height >= height) return;
+            await sleep(1000);
+          }
+        };
+        return { txid, waitForConfirmation };
+      },
     };
     return this.built;
   }
