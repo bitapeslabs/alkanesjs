@@ -1,5 +1,6 @@
 import {
   BoxedResponse,
+  BoxedPromise,
   isBoxedError,
   BoxedSuccess,
   BoxedError,
@@ -7,6 +8,16 @@ import {
 } from "@/boxed";
 import { AlkaneId } from "@/apis";
 import { Provider } from "@/provider";
+/**
+ * What a contract needs from whoever holds it: a provider to ask through and
+ * a signing authority to defer to. Every `AlkanesAccount` satisfies this —
+ * a `ViewAccount` by refusing to sign — and the legacy read-only factories
+ * satisfy it with an inline refuser.
+ */
+export interface ContractHost {
+  provider: Provider;
+  sign(unsigned: string): Promise<string>;
+}
 
 import {
   AlkanesExecuteError,
@@ -23,6 +34,22 @@ import { Expand, sleep } from "@/utils";
 import { BorshSchema, Infer as BorshInfer, borshSerialize } from "borsher";
 import { abi, Schema, ResolveSchema, Dec } from "./builder"; // 🠕
 import { Encodable, EncodeError, EncoderFns } from "../encoders";
+import { LegacyCodec, RawCodec } from "../alkabi/codecs";
+import {
+  runWasmView,
+  bytesToHex,
+  PLACEHOLDER_HEIGHT,
+  type ViewCallOptions,
+} from "../alkabi/wasm-runtime";
+
+/** One entry of a view bundle — everything needed to encode and decode it. */
+export interface BundledViewCall {
+  name: string;
+  opcode: bigint;
+  arg: unknown;
+  inShape: unknown;
+  outShape: unknown;
+}
 
 export enum AlkanesSimulationError {
   UnknownError = "UnknownError",
@@ -32,22 +59,42 @@ export enum AlkanesSimulationError {
 export type OpcodeTable = { readonly [K in string]: bigint };
 
 export type AlkanesPushExecuteResponse<T> = Expand<{
-  waitForResult: () => Promise<
-    BoxedResponse<IDecodableAlkanesResponse<T>, AlkanesExecuteError>
+  waitForResult: () => BoxedPromise<
+    IDecodableAlkanesResponse<T>,
+    AlkanesExecuteError
   >;
   txid: string;
 }>;
 
 const isBorshSchema = <T>(schema: Schema | Dec): schema is BorshSchema<T> =>
-  !(typeof schema === "string");
+  typeof schema !== "string" && schema instanceof BorshSchema;
+
+/** espo returns value bytes as "0x…" hex ("0x" for unset). */
+function hexFromEspo(valueHex: string | undefined): Uint8Array {
+  const clean = (valueHex ?? "0x").replace(/^0x/, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }
+  return out;
+}
 
 export abstract class AlkanesBaseContract {
   constructor(
-    protected readonly provider: Provider,
+    /**
+     * Whose provider the contract asks through — and, for the legacy execute
+     * path below, whose signing authority a write defers to. A `ViewAccount`
+     * serves every read; only the deprecated direct-execute path ever asks it
+     * to sign, and a view-only account answers that by refusing.
+     */
+    protected readonly account: ContractHost,
     public readonly alkaneId: AlkaneId,
-    private readonly signPsbtFn: (unsigned: string) => Promise<string>,
   ) {}
   protected abstract get OpCodes(): OpcodeTable;
+
+  protected get provider(): Provider {
+    return this.account.provider;
+  }
 
   /*─────────────── thin helpers around Provider ───────────────*/
   protected get rpc() {
@@ -62,7 +109,7 @@ export abstract class AlkanesBaseContract {
   }
 
   public get signPsbt() {
-    return this.signPsbtFn.bind(this);
+    return (unsigned: string) => this.account.sign(unsigned);
   }
 
   public simulate(
@@ -78,6 +125,14 @@ export abstract class AlkanesBaseContract {
     if (shape === "__void") {
       return new BoxedSuccess([]);
     }
+    /* alkabi legacy calldata (positional u128 words) */
+    if (shape instanceof LegacyCodec) {
+      try {
+        return new BoxedSuccess(shape.encodeCalldata(arg));
+      } catch (error) {
+        return new BoxedError("Legacy encoding failed: " + (error as Error).message, EncodeError.InvalidPayload);
+      }
+    }
     let encoder = isBorshSchema(shape)
       ? new Encodable(arg, shape)
       : new Encodable(arg);
@@ -89,11 +144,38 @@ export abstract class AlkanesBaseContract {
     return bigintArrayResponse;
   }
 
+  /**
+   * Encode a call's argument into the u128 words a protostone message carries.
+   * The transaction builder writes the cellpack; the contract owns the shapes,
+   * so the encoding stays here.
+   */
+  public encodeCalldata<I extends Schema>(
+    arg: ResolveSchema<I>,
+    inShape: I,
+  ): BoxedResponse<bigint[], EncodeError> {
+    return this.getEncodedCallData(arg, inShape);
+  }
+
+  /** Decode returndata with a method's declared output shape. */
+  public decodeReturn<O extends Schema>(
+    bytes: Uint8Array,
+    outShape: O,
+  ): ResolveSchema<O> {
+    return consumeOrThrow(this.getDecodedResponse(bytes, outShape));
+  }
+
   private getDecodedResponse<O extends Schema>(
     response: ConstructorParameters<typeof DecodableAlkanesResponse>[0],
     outShape: O,
   ): BoxedResponse<ResolveSchema<O>, DecodeError> {
     try {
+      /* alkabi raw / legacy returndata (schema-driven decoding) */
+      if (outShape instanceof RawCodec || outShape instanceof LegacyCodec) {
+        const decodable = new DecodableAlkanesResponse(response);
+        return new BoxedSuccess(
+          outShape.decodeReturn(decodable.bytes) as ResolveSchema<O>,
+        );
+      }
       let decodable = isBorshSchema(outShape)
         ? new DecodableAlkanesResponse(response, outShape)
         : new DecodableAlkanesResponse(response);
@@ -102,10 +184,7 @@ export abstract class AlkanesBaseContract {
         : decodable.decodeTo(outShape as keyof DecoderFns<unknown>);
       return new BoxedSuccess(decodedResponse as ResolveSchema<O>);
     } catch (error) {
-      return new BoxedError(
-        DecodeError.UnknownError,
-        "Decoding response failed: " + (error as Error).message,
-      );
+      return new BoxedError("Decoding response failed: " + (error as Error).message, DecodeError.UnknownError);
     }
   }
 
@@ -131,32 +210,28 @@ export abstract class AlkanesBaseContract {
         await sleep(1000);
       }
 
-      return new BoxedSuccess({
-        waitForResult: async (): Promise<
-          BoxedResponse<IDecodableAlkanesResponse<T>, AlkanesExecuteError>
-        > => {
-          try {
-            const traceResult = consumeOrThrow(
-              await this.provider.waitForTraceResult(lastTxid),
-            );
+      const waitForResult = async (): Promise<
+        BoxedResponse<IDecodableAlkanesResponse<T>, AlkanesExecuteError>
+      > => {
+        try {
+          const traceResult = consumeOrThrow(
+            await this.provider.waitForTraceResult(lastTxid),
+          );
 
-            return new BoxedSuccess(
-              new DecodableAlkanesResponse(traceResult.return, borshSchema),
-            );
-          } catch (err) {
-            return new BoxedError(
-              AlkanesExecuteError.UnknownError,
-              "Wait for result failed: " + (err as Error).message,
-            );
-          }
-        },
+          return new BoxedSuccess(
+            new DecodableAlkanesResponse(traceResult.return, borshSchema),
+          );
+        } catch (err) {
+          return new BoxedError("Wait for result failed: " + (err as Error).message, AlkanesExecuteError.UnknownError);
+        }
+      };
+
+      return new BoxedSuccess({
+        waitForResult: () => BoxedPromise.from(waitForResult()),
         txid: lastTxid,
       });
     } catch (err) {
-      return new BoxedError(
-        AlkanesExecuteError.UnknownError,
-        "Push execute failed: " + (err as Error).message,
-      );
+      return new BoxedError("Push execute failed: " + (err as Error).message, AlkanesExecuteError.UnknownError);
     }
   };
 
@@ -182,11 +257,212 @@ export abstract class AlkanesBaseContract {
         consumeOrThrow(this.getDecodedResponse(response, outShape)),
       );
     } catch (error) {
-      return new BoxedError(
-        AlkanesSimulationError.UnknownError,
-        "Simulation failed: " + (error as Error).message,
-      );
+      return new BoxedError("Simulation failed: " + (error as Error).message, AlkanesSimulationError.UnknownError);
     }
+  }
+
+  /**
+   * A view evaluated by running the contract's own wasm instead of asking the
+   * indexer to simulate it. Storage the contract reaches for is fetched from
+   * espo in batches (see `runWasmView`), so this costs a handful of key reads
+   * rather than a simulate — and it is exact, because it *is* the contract.
+   *
+   * Needs espo and the contract bytes; without either, or if the view turns out
+   * to be impure, or on any failure at all, it falls back to simulate. Running
+   * the wasm is an optimization, never load-bearing for correctness.
+   */
+  public async handleWasmView<I extends Schema, O extends Schema>(
+    opcode: bigint,
+    arg: ResolveSchema<I>,
+    inShape: I,
+    outShape: O,
+    wasm: Uint8Array | WebAssembly.Module,
+    opts?: ViewCallOptions,
+  ): Promise<BoxedResponse<ResolveSchema<O>, AlkanesSimulationError>> {
+    try {
+      if (!this.provider.espoUrl) {
+        return this.handleView(opcode, arg, inShape, outShape);
+      }
+
+      const words = consumeOrThrow(this.getEncodedCallData(arg, inShape));
+      // The height comes from espo, the same place the storage does, so a view
+      // that reads both sees one coherent view of the chain. Only fetched when
+      // the caller says the answer depends on it.
+      let height = PLACEHOLDER_HEIGHT;
+      if (opts?.latestHeight) {
+        const tip = consumeOrThrow(await this.provider.rpc.espo.getTipHeight());
+        height = BigInt(typeof tip === "number" ? tip : tip.height);
+      }
+      const alkaneStr = `${this.alkaneId.block}:${this.alkaneId.tx}`;
+
+      const bytes = await runWasmView({
+        wasm,
+        alkaneId: this.alkaneId,
+        opcode,
+        words,
+        height,
+        fetchKeys: async (keys) => {
+          const result = await this.provider.rpc.espo.getKeys(alkaneStr, {
+            keys: keys.map((k) => "0x" + bytesToHex(k)),
+            try_decode_utf8: false,
+            // espo defaults its limit to 100 — a long key list loses its tail
+            limit: Math.max(keys.length, 1),
+          });
+          if (result.isErr()) throw new Error("espo get_keys failed");
+          const out = new Map<string, Uint8Array>();
+          for (const item of Object.values(result.data.items)) {
+            out.set(
+              item.key_hex.replace(/^0x/, "").toLowerCase(),
+              hexFromEspo(item.value_hex),
+            );
+          }
+          return out;
+        },
+      });
+
+      return new BoxedSuccess(
+        consumeOrThrow(this.getDecodedResponse(bytes, outShape)),
+      );
+    } catch {
+      // any failure → fall back to the authoritative simulate path
+      return this.handleView(opcode, arg, inShape, outShape);
+    }
+  }
+
+  /**
+   * Execute a set of view calls as ONE JSON-RPC batch. Each entry is encoded
+   * to an `alkanes_simulate`, the whole array goes out in a single HTTP
+   * request, and each response decodes with its own output shape.
+   *
+   * Nothing here throws and nothing is unwrapped: every entry resolves to its
+   * own `BoxedResponse`, exactly as awaiting that view individually would, so
+   * each result is handled on its own terms — `.unwrap()`, `.unwrapOr(x)`,
+   * `.isErr()`, whatever that call deserves. One reverted view doesn't cost
+   * the others their results.
+   *
+   * Heights are sent as `0`: kirby substitutes its espo tip, so the batch
+   * needs no height pre-fetch. Pointing this at a raw metashrew instead of a
+   * kirby will simulate at height 0 — this path is designed for kirby.
+   */
+  public async handleViewBundle(
+    calls: BundledViewCall[],
+  ): Promise<BoxedResponse<unknown, AlkanesSimulationError>[]> {
+    const results: (BoxedResponse<unknown, AlkanesSimulationError> | undefined)[] =
+      new Array(calls.length).fill(undefined);
+
+    // Encode first. An entry that can't encode becomes its own error and the
+    // rest of the batch still ships.
+    const entries: { call: BundledViewCall; index: number; body: unknown }[] = [];
+    calls.forEach((c, index) => {
+      const words = this.getEncodedCallData(c.arg as never, c.inShape as never);
+      if (isBoxedError(words)) {
+        results[index] = new BoxedError(
+          `${c.name}: ${words.message ?? "encoding failed"}`,
+          AlkanesSimulationError.UnknownError,
+        );
+        return;
+      }
+      entries.push({
+        call: c,
+        index,
+        body: {
+          jsonrpc: "2.0",
+          id: index,
+          method: "alkanes_simulate",
+          params: [
+            {
+              alkanes: [],
+              transaction: "0x",
+              block: "0x",
+              height: "0",
+              txindex: 0,
+              target: {
+                block: this.alkaneId.block.toString(),
+                tx: this.alkaneId.tx.toString(),
+              },
+              inputs: [c.opcode.toString(), ...words.data.map((w) => w.toString())],
+              pointer: 0,
+              refundPointer: 0,
+              vout: 0,
+            },
+          ],
+        },
+      });
+    });
+
+    if (entries.length > 0) {
+      try {
+        const res = await fetch(this.provider.metashrewUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entries.map((e) => e.body)),
+        });
+        const body = (await res.json()) as Array<{
+          id: number;
+          result?: { execution?: { data?: string; error?: string | null } };
+          error?: { message?: string };
+        }>;
+        if (!Array.isArray(body)) {
+          throw new Error("expected a batch response array");
+        }
+        const byId = new Map(body.map((r) => [r.id, r]));
+
+        for (const { call, index } of entries) {
+          const r = byId.get(index);
+          if (!r) {
+            results[index] = new BoxedError(
+              `${call.name}: no response in batch`,
+              AlkanesSimulationError.UnknownError,
+            );
+            continue;
+          }
+          if (r.error) {
+            results[index] = new BoxedError(
+              `${call.name}: ${r.error.message ?? "rpc error"}`,
+              AlkanesSimulationError.UnknownError,
+            );
+            continue;
+          }
+          const exec = r.result?.execution;
+          if (!exec) {
+            results[index] = new BoxedError(
+              `${call.name}: malformed simulate response`,
+              AlkanesSimulationError.UnknownError,
+            );
+            continue;
+          }
+          if (exec.error) {
+            results[index] = new BoxedError(
+              `${call.name}: ${exec.error}`,
+              AlkanesSimulationError.TransactionReverted,
+            );
+            continue;
+          }
+          const decoded = this.getDecodedResponse(
+            hexFromEspo(exec.data),
+            call.outShape as never,
+          );
+          results[index] = isBoxedError(decoded)
+            ? new BoxedError(
+                `${call.name}: ${decoded.message ?? "decode failed"}`,
+                AlkanesSimulationError.UnknownError,
+              )
+            : new BoxedSuccess(decoded.data as unknown);
+        }
+      } catch (error) {
+        // transport-level failure: every still-pending entry fails, boxed
+        for (const { call, index } of entries) {
+          if (results[index] === undefined) {
+            results[index] = new BoxedError(
+              `${call.name}: bundle transport failed: ${(error as Error).message}`,
+              AlkanesSimulationError.UnknownError,
+            );
+          }
+        }
+      }
+    }
+
+    return results as BoxedResponse<unknown, AlkanesSimulationError>[];
   }
 
   public async handleExecute<
@@ -249,10 +525,7 @@ export abstract class AlkanesBaseContract {
         AlkanesExecuteError
       >;
     } catch (error) {
-      return new BoxedError(
-        AlkanesExecuteError.UnknownError,
-        "Execution failed: " + (error as Error).message,
-      );
+      return new BoxedError("Execution failed: " + (error as Error).message, AlkanesExecuteError.UnknownError);
     }
   }
 }

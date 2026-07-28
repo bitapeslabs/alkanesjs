@@ -3,13 +3,13 @@
     "allowJs": true,
     "target": "ESNext",
     "module": "CommonJS",
-    "rootDir": "./src",
     "outDir": "./dist",
+    "rootDir": "./src",
     "strict": true,
-    "ignoreDeprecations": "6.0",
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "experimentalDecorators": true,
+    "ignoreDeprecations": "6.0",
 
     "baseUrl": "./",
     "paths": {

@@ -1,0 +1,9 @@
+{
+  "name": "alkanesjs-wallets",
+  "private": true,
+  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/wallets",
+  "main": "../dist/wallets.js",
+  "module": "../dist/wallets.mjs",
+  "browser": "../dist/wallets.mjs",
+  "types": "../dist/wallets.d.ts"
+}

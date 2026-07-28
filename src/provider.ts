@@ -8,6 +8,19 @@ import { WaitPacer } from "./pacer";
 
 import { AlkanesExecuteError, execute, simulate } from "@/libs/alkanes";
 import {
+  runSimulatedBlock,
+  type AlkaneTx,
+  type BlockResults,
+} from "@/libs/alkanes/account";
+import {
+  decodeSimulateBlockResponse,
+  decodeSimulateTransactionResponse,
+  encodeSimulateBlockRequest,
+  encodeSimulateTransactionRequest,
+  type SimulatedBlock,
+  type SimulatedTransaction,
+} from "@/apis/alkanes/simtx";
+import {
   retryOnBoxedError,
   BoxedResponse,
   BoxedSuccess,
@@ -29,17 +42,33 @@ import {
 
 import { sleep } from "@/utils";
 import { AlkanesSimulationError } from "./libs";
+import { setFetchDebug } from "./debug";
 
-export interface ProviderConfig {
-  sandshrewUrl: string;
-  electrumApiUrl: string;
-  espoUrl?: string;
+interface ProviderConfigBase {
   network: BitcoinNetwork;
   explorerUrl: string;
   defaultFeeRate?: number;
   btcTicker?: string;
   pacerSettings?: PacerSettings;
+  /** When true, logs every API call as `[CALL] <endpoint> <body>`. */
+  /**
+   * API-call logging level. 0 (default) — silent. 1 — one line per outgoing
+   * request: URL, rpc method, response time. 2 — the JSON body as well.
+   */
+  debug?: number;
 }
+
+/**
+ * Where the provider's JSON-RPC goes. `metashrewUrl` is any endpoint speaking
+ * the metashrew/alkanes methods — a kirby's `/rpc`, a sandshrew-style gateway,
+ * subfrost — they all answer the same contract, which is the point: the SDK
+ * targets the standard API and the URL decides who serves it. `espoUrl` is
+ * espo's own getters (a kirby's `/espo`, or espo directly).
+ */
+export type ProviderConfig = ProviderConfigBase & {
+  metashrewUrl: string;
+  espoUrl?: string;
+};
 
 enum AlkanesPollError {
   UnknownError = "UnknownError",
@@ -57,8 +86,7 @@ export type AlkanesParsedTraceResult = {
 };
 
 export class Provider {
-  readonly sandshrewUrl: string;
-  readonly electrumApiUrl: string;
+  readonly metashrewUrl: string;
   readonly espoUrl?: string;
   readonly network: BitcoinNetwork;
   readonly explorerUrl: string;
@@ -75,8 +103,7 @@ export class Provider {
   public pacer: WaitPacer;
 
   constructor(config: ProviderConfig) {
-    this.sandshrewUrl = config.sandshrewUrl;
-    this.electrumApiUrl = config.electrumApiUrl;
+    this.metashrewUrl = config.metashrewUrl;
     this.espoUrl = config.espoUrl;
     this.network = config.network;
     this.explorerUrl = config.explorerUrl.replace(/\/+$/, "");
@@ -86,6 +113,17 @@ export class Provider {
 
     this.rpc = new BaseRpcProvider(this);
     this.pacer = new WaitPacer(this.pacerSettings);
+
+    if (config.debug) this.setDebug(config.debug);
+  }
+
+  /**
+   * Set API-call logging: 0 silent, 1 method + response time per request,
+   * 2 the JSON body as well. All transports share one fetch wrapper, so this
+   * applies globally.
+   */
+  setDebug(level: number): void {
+    setFetchDebug(level);
   }
 
   protected txUrl(txid: string): string {
@@ -96,7 +134,7 @@ export class Provider {
   }
 
   buildRpcCall<T>(method: string, params: unknown[] = []): RpcCall<T> {
-    return sandshrewBuildRpcCall<T>(method, params, this.sandshrewUrl);
+    return sandshrewBuildRpcCall<T>(method, params, this.metashrewUrl);
   }
 
   execute(
@@ -115,6 +153,117 @@ export class Provider {
       [AlkanesExecuteError.UnknownError, AlkanesExecuteError.InvalidParams],
     );
   }
+  /**
+   * Simulate a chunk of transactions in order against one shared state, the way
+   * they would land in a block — each sees the storage the ones before it wrote
+   * and the alkanes they moved. They go out as raw transaction hex, so what is
+   * simulated is the transaction rather than a description of one.
+   *
+   *     const [before, , after] = await provider.simulateBlock([
+   *       alice.tx().call(pool, "getReserves").unwrap(),
+   *       alice.tx().transfer(TOKEN_0, amountIn, 1).call(pool, "swap", args),
+   *       alice.tx().call(pool, "getReserves").unwrap(),
+   *     ]);
+   *
+   * Goes out as `alkanes_simulateblock` — the transactions wrapped in a block,
+   * which is the authoritative way to ask this. It hangs off the provider
+   * rather than off a transaction because a chunk is nobody's transaction in
+   * particular, and the endpoint is the provider's to know.
+   */
+  simulateBlock<T extends readonly AlkaneTx<any, any>[]>(
+    // `[...T]` rather than `T`: it makes the array literal infer as a tuple, so
+    // each slot keeps its own type instead of collapsing to a union
+    txs: readonly [...T],
+  ): Promise<BlockResults<T>> {
+    return runSimulatedBlock(this, txs);
+  }
+
+  /**
+   * Simulate one raw transaction — signed or not, since nothing here checks a
+   * signature — via `alkanes_simulatetransaction`, the metashrew view for
+   * exactly this question. kirby answers tip-state requests itself and hands
+   * anything else to metashrew, so this call behaves identically against
+   * either endpoint; kirby is just the fast way to ask.
+   */
+  async simulateTransaction(
+    txHex: string,
+    era?: number,
+  ): Promise<SimulatedTransaction> {
+    const result = await this.protobufView(
+      "alkanes_simulatetransaction",
+      (tip) => encodeSimulateTransactionRequest(txHex, tip),
+      era,
+    );
+    return decodeSimulateTransactionResponse(result);
+  }
+
+  /** The height the endpoint has indexed to. */
+  async height(): Promise<number> {
+    return Number(consumeOrThrow(await this.rpc.alkanes.alkanes_metashrewHeight().call()));
+  }
+
+  /**
+   * Simulate a whole consensus-encoded block — `alkanes_simulateblock`, the
+   * same view for a block that `simulateTransaction` is for a transaction.
+   * Every transaction runs in order against one shared state, so each sees
+   * what the ones before it did. `simulateBlock` is the ergonomic way in;
+   * this is here for callers holding block bytes already.
+   */
+  async simulateRawBlock(
+    blockHex: string,
+    era?: number,
+  ): Promise<SimulatedBlock> {
+    const result = await this.protobufView(
+      "alkanes_simulateblock",
+      (tip) => encodeSimulateBlockRequest(blockHex, tip),
+      era,
+    );
+    return decodeSimulateBlockResponse(result);
+  }
+
+  /**
+   * One of the hex-protobuf metashrew views, asked at the current era.
+   *
+   * The height in these requests selects the consensus era, not the state —
+   * passing 0 means pre-genesis rules and nothing modern survives them. So ask
+   * the endpoint where its tip is first; one small call, and it makes the
+   * request correct against bare metashrew and kirby alike.
+   *
+   * `era` overrides that, for the one case where the endpoint's own answer is
+   * the wrong one: asking two endpoints the same question. They index
+   * independently and are routinely a block apart, so letting each pick its
+   * own tip means comparing answers from two different eras.
+   */
+  private async protobufView(
+    method: string,
+    request: (tip: number) => string,
+    era?: number,
+  ): Promise<string> {
+    const ask = (body: unknown) =>
+      fetch(this.metashrewUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((r) => r.json() as Promise<any>);
+
+    const tip =
+      era ??
+      Number(
+        (await ask({ jsonrpc: "2.0", id: 1, method: "metashrew_height", params: [] }))
+          ?.result ?? 0,
+      );
+    const json = await ask({
+      jsonrpc: "2.0",
+      id: 1,
+      method,
+      params: [request(tip)],
+    });
+    if (json?.error || typeof json?.result !== "string") {
+      throw new Error(json?.error?.message ?? `${method} failed`);
+    }
+    return json.result;
+  }
+
   simulate(
     request: Parameters<typeof simulate>[1],
   ): ReturnType<typeof simulate> {
@@ -171,10 +320,7 @@ export class Provider {
       }
       return new BoxedSuccess(true);
     } catch (err) {
-      return new BoxedError(
-        AlkanesPollError.UnknownError,
-        "An error occurred while waiting for blocks: " + (err as Error).message,
-      );
+      return new BoxedError("An error occurred while waiting for blocks: " + (err as Error).message, AlkanesPollError.UnknownError);
     }
   };
 
@@ -199,7 +345,7 @@ export class Provider {
       let errors = traceResults.filter(isBoxedError);
       let success = (
         traceResults.filter((result) => !isBoxedError(result)) as
-          | BoxedSuccess<AlkanesTraceResult>[]
+          | BoxedSuccess<AlkanesTraceResult, AlkanesTraceError>[]
           | undefined
       )?.[0]?.data;
 
@@ -222,10 +368,7 @@ export class Provider {
       }
 
       if (maxAttempts-- <= 0) {
-        return new BoxedError(
-          AlkanesTraceError.NoTraceFound,
-          "No trace found for the given txid after 300 attempts",
-        );
+        return new BoxedError("No trace found for the given txid after 300 attempts", AlkanesTraceError.NoTraceFound);
       }
 
       await sleep(2000);
@@ -251,11 +394,8 @@ export class Provider {
       }
       return new BoxedSuccess(true);
     } catch (err) {
-      return new BoxedError(
-        AlkanesPollError.UnknownError,
-        "An error ocurred while waiting for tx confirmation: " +
-          (err as Error).message,
-      );
+      return new BoxedError("An error ocurred while waiting for tx confirmation: " +
+          (err as Error).message, AlkanesPollError.UnknownError);
     }
   };
 }

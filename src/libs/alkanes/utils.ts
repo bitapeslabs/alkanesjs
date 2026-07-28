@@ -119,11 +119,15 @@ export function redeemTypeFromOutput(
   }
 }
 
-export function addInputDynamic(
-  psbt: bitcoin.Psbt,
+/**
+ * The PSBT input record for a FormattedUtxo, classified by its actual prevout
+ * script. Shared by addInputDynamic and by callers that need an
+ * IncludeInputOption's `input_extended` (e.g. pinning a CPFP parent output).
+ */
+export function buildPsbtInput(
   network: bitcoin.Network,
   utxo: FormattedUtxo,
-) {
+): Parameters<bitcoin.Psbt["addInput"]>[0] {
   const prevTx = utxo.prevTx;
   const prevOut = prevTx.vout[utxo.outputIndex];
   const scriptBuf = Buffer.from(prevOut.scriptpubkey, "hex");
@@ -131,24 +135,22 @@ export function addInputDynamic(
 
   switch (addrType) {
     case AddressType.P2WPKH: {
-      psbt.addInput({
+      return {
         hash: utxo.txId,
         index: utxo.outputIndex,
         witnessUtxo: {
           script: scriptBuf,
           value: prevOut.value,
         },
-      });
-      break;
+      };
     }
 
     case AddressType.P2PKH: {
-      psbt.addInput({
+      return {
         hash: utxo.txId,
         index: utxo.outputIndex,
         nonWitnessUtxo: Buffer.from(utxo.prevTxHex, "hex"),
-      });
-      break;
+      };
     }
 
     case AddressType.P2SH_P2WPKH: {
@@ -159,7 +161,7 @@ export function addInputDynamic(
         redeemTypeFromOutput(redeem.redeem.output!, network) ===
           AddressType.P2WPKH
       ) {
-        psbt.addInput({
+        return {
           hash: utxo.txId,
           index: utxo.outputIndex,
           witnessUtxo: {
@@ -167,15 +169,13 @@ export function addInputDynamic(
             value: prevOut.value,
           },
           redeemScript: redeem.redeem.output!,
-        });
-      } else {
-        throw new Error("Unsupported P2SH script (expected P2WPKH-nested)");
+        };
       }
-      break;
+      throw new Error("Unsupported P2SH script (expected P2WPKH-nested)");
     }
 
     case AddressType.P2TR: {
-      psbt.addInput({
+      return {
         hash: utxo.txId,
         index: utxo.outputIndex,
         witnessUtxo: {
@@ -183,14 +183,20 @@ export function addInputDynamic(
           value: prevOut.value,
         },
         tapInternalKey: scriptBuf.subarray(2, 34),
-      });
-      break;
+      };
     }
 
     default:
-      const key = String(addrType);
-      throw new Error(`Unsupported script type: ${key}`);
+      throw new Error(`Unsupported script type: ${String(addrType)}`);
   }
+}
+
+export function addInputDynamic(
+  psbt: bitcoin.Psbt,
+  network: bitcoin.Network,
+  utxo: FormattedUtxo,
+) {
+  psbt.addInput(buildPsbtInput(network, utxo));
 }
 
 export const psbtBuilder = async <T extends BasePsbtParams>(

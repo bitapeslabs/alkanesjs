@@ -55,7 +55,11 @@ fs.readdirSync(distDir, { withFileTypes: true }).forEach((entry) => {
   const fullPath = path.join(distDir, entry.name);
   if (entry.isDirectory()) {
     fs.rmSync(fullPath, { recursive: true, force: true });
-  } else if (entry.name !== "index.d.ts" && entry.name.endsWith(".d.ts")) {
+  } else if (
+    entry.name !== "index.d.ts" &&
+    entry.name !== "wallets.d.ts" &&
+    entry.name.endsWith(".d.ts")
+  ) {
     fs.rmSync(fullPath);
   }
 });
@@ -160,14 +164,33 @@ async function buildBrowserESM() {
 }
 
 /*──────────────────────────────────────────────────────────────*
+ | Wallet connectors entry — pure DOM code with no node deps, so |
+ | it bundles the same for every platform. Ships as CJS + ESM.   |
+ *──────────────────────────────────────────────────────────────*/
+async function buildWallets(format, outfile) {
+  return build({
+    entryPoints: ["src/wallets.ts"],
+    outfile: path.join(distDir, outfile),
+    bundle: true,
+    platform: "neutral",
+    target: ["es2020"],
+    format,
+    sourcemap: true,
+    plugins: [removeNegZeroPlugin],
+  });
+}
+
+/*──────────────────────────────────────────────────────────────*
  | Run builds                                                    |
  *──────────────────────────────────────────────────────────────*/
 if (wantNode) {
   console.log("→ Building Node (CJS) bundle…");
   await buildNodeCJS();
+  await buildWallets("cjs", "wallets.js");
 }
 if (wantBrowser) {
   console.log("→ Building Browser (ESM) bundle…");
   await buildBrowserESM();
+  await buildWallets("esm", "wallets.mjs");
 }
 console.log("✓ Done.");

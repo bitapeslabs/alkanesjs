@@ -592,6 +592,27 @@ type Keys = readonly PropertyKey[];
 
 export type Strip<T, K extends Keys> = Omit<T, Extract<K[number], keyof T>>;
 // convenience aliases for your two cases
+/* -------------------------------------------------------------------------- */
+/* Subfrost module                                                            */
+/* -------------------------------------------------------------------------- */
+
+export interface EspoGetSubfrostSignerOk extends EspoOkResult {
+  /** The alkane whose storage holds the signer (frBTC, "32:0"). */
+  alkane: EspoAlkaneId;
+  storage_key: string;
+  /** 0x-prefixed P2TR script_pubkey hex. */
+  script_pubkey: string;
+  address: string;
+}
+
+export type EspoGetSubfrostSignerResult =
+  | EspoGetSubfrostSignerOk
+  | EspoErrorResult;
+
+export type EspoGetSubfrostSigner = DeepExpand<
+  UnwrapEspoResult<EspoGetSubfrostSignerOk>
+>;
+
 export type UnwrapEspoResult<T> = Strip<T, ["ok", "error", "hint"]>;
 
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
@@ -601,3 +622,89 @@ export type DeepExpand<T> = T extends Primitive
   : T extends Array<infer U>
   ? Array<DeepExpand<U>>
   : { [K in keyof T]: DeepExpand<T[K]> };
+
+/* -------------------------------------------------------------------------- */
+/* btc module — broadcast surface                                             */
+/* -------------------------------------------------------------------------- */
+
+/*
+  `btc.submit_package` hands a set of raw transactions to Bitcoin Core's
+  `submitpackage` — the way to broadcast a CPFP pair (commit + reveal, parent +
+  child) atomically, so a parent paying under the mempool minimum still relays
+  as long as the package rate clears it. The result is Core's own answer,
+  passed through.
+*/
+export interface EspoSubmitPackageTxResult {
+  txid: string;
+  error?: string;
+  vsize?: number;
+  fees?: { base?: number; [k: string]: unknown };
+  [k: string]: unknown;
+}
+
+export interface EspoSubmitPackageResult {
+  package_msg: string;
+  "tx-results"?: Record<string, EspoSubmitPackageTxResult>;
+  "replaced-transactions"?: string[];
+  [k: string]: unknown;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Alkabi                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export type EspoAlkabiFormat = "json" | "ts";
+
+/** The self-describing ABI a contract embeds — see alkabi's DESIGN.md. */
+export interface EspoAlkabiDocument {
+  alkabi: number;
+  contract: string;
+  types: Record<string, unknown>;
+  methods: {
+    name: string;
+    opcode: number;
+    kind: string;
+    [k: string]: unknown;
+  }[];
+  [k: string]: unknown;
+}
+
+export interface EspoGetAlkabiOk extends EspoOkResult {
+  alkane: EspoAlkaneId;
+  format: EspoAlkabiFormat;
+  /** The document for `format: "json"`, the rendered module for `"ts"`. */
+  abi: EspoAlkabiDocument | string;
+}
+
+export type EspoGetAlkabiResult = EspoGetAlkabiOk | EspoErrorResult;
+
+// no DeepExpand: it widens the document's `unknown` members into `{}`
+export type EspoGetAlkabi = UnwrapEspoResult<EspoGetAlkabiOk>;
+
+/* -------------------------------------------------------------------------- */
+/* Transaction traces                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** One protostone event exactly as espo indexed it — values still 0x hex. */
+export interface EspoTraceEvent {
+  event: "create" | "invoke" | "return" | (string & {});
+  data: unknown;
+}
+
+export interface EspoTransactionTrace {
+  /** `txid:vout` — the shadow vout the indexer filed the trace under. */
+  outpoint: string;
+  events: EspoTraceEvent[];
+}
+
+export interface EspoGetAlkaneTxSummaryOk extends EspoOkResult {
+  txid: string;
+  height: number;
+  traces: EspoTransactionTrace[];
+}
+
+export type EspoGetAlkaneTxSummaryResult =
+  | EspoGetAlkaneTxSummaryOk
+  | EspoErrorResult;
+
+export type EspoGetAlkaneTxSummary = UnwrapEspoResult<EspoGetAlkaneTxSummaryOk>;

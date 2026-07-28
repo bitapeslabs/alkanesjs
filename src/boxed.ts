@@ -1,187 +1,86 @@
 /*
-  These error types are to be propagated throughout the backend. Every consumer of a function that returns
-  a BoxedResponse needs to properly handle the consumed functions error types. This pattern is one of the
-  hardcoded rules of our code structure design patterns, this MUST be followed.
+  Boxed responses come from the bxrs package (https://github.com/encloinc/boxedts)
+  — the canonical evolution of the BoxedResponse pattern, with Rust-style
+  combinators (`unwrap`, `unwrapOr`, `expect`, `map`, `andThen`, `isOk`/`isErr`)
+  on every response. Every consumer of a function that returns a BoxedResponse
+  needs to properly handle the consumed function's error types.
+
+  NOTE: bxrs's BoxedError constructor takes (message?, errorType?) — message
+  first — unlike the legacy in-repo implementation this file used to hold.
 */
 
-/** Represents just the error shape (status: false) */
-export interface IBoxedError<E extends string | number> {
-  status: false;
-  errorType: E;
-  message?: string;
-}
+export * from "bxrs";
 
-/** Represents just the success shape (status: true) */
-export interface IBoxedSuccess<T> {
-  status: true;
-  data: T;
-}
+import { BoxedResponse, IBoxedError, isBoxedError } from "bxrs";
 
-/** A union that can be either an error or a success */
-export type BoxedResponse<T, E extends string | number> =
-  | IBoxedError<E>
-  | IBoxedSuccess<T>;
+/*─────────────────────────────────────────────────────────────
+  BoxedPromise — alkanesjs's extension of bxrs to the async world.
+  -----------------------------------------------------------
+  A thenable around Promise<BoxedResponse<T, E>> that lets the bxrs
+  combinators run as soon as the promise fulfills:
 
-/** A class implementing the error shape */
-export class BoxedError<E extends string | number> implements IBoxedError<E> {
-  public status: false = false;
-  public errorType: E;
-  public message?: string;
+    const symbol = await contract.getSymbol().unwrap();     // string
+    const supply = await contract.getTotalSupply().unwrapOr(0n);
 
-  constructor(errorType: E, message?: string) {
-    this.message = message;
-    this.errorType = errorType;
+  Awaiting the BoxedPromise itself still yields the plain
+  BoxedResponse, so existing consumeOrThrow-style code keeps working.
+──────────────────────────────────────────────────────────────*/
+export class BoxedPromise<T, E extends string | number>
+  implements PromiseLike<BoxedResponse<T, E>>
+{
+  constructor(private readonly promise: Promise<BoxedResponse<T, E>>) {}
+
+  static from<T, E extends string | number>(
+    value: Promise<BoxedResponse<T, E>> | BoxedResponse<T, E>,
+  ): BoxedPromise<T, E> {
+    return new BoxedPromise(Promise.resolve(value));
   }
-}
 
-/** A class implementing the success shape */
-export class BoxedSuccess<T> implements IBoxedSuccess<T> {
-  public status: true = true;
-  public data: T;
-
-  constructor(data: T) {
-    this.data = data;
+  /* PromiseLike — awaiting yields the BoxedResponse unchanged */
+  then<R1 = BoxedResponse<T, E>, R2 = never>(
+    onfulfilled?:
+      | ((value: BoxedResponse<T, E>) => R1 | PromiseLike<R1>)
+      | null,
+    onrejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
+  ): Promise<R1 | R2> {
+    return this.promise.then(onfulfilled, onrejected);
   }
-}
 
-/**
- * Type guard checking if a BoxedResponse is a BoxedError
- */
-export function isBoxedError<T, E extends string | number>(
-  response: BoxedResponse<T, E>
-): response is IBoxedError<E> {
-  return response.status === false;
-}
+  catch<R = never>(
+    onrejected?: ((reason: unknown) => R | PromiseLike<R>) | null,
+  ): Promise<BoxedResponse<T, E> | R> {
+    return this.promise.catch(onrejected);
+  }
 
-export function consumeOrThrow<T, E extends string | number>(
-  response: BoxedResponse<T, E>
-): T {
-  if (isBoxedError(response)) {
-    throw new Error(
-      `BoxedError: ${response.errorType} - ${
-        response.message || "No message provided"
-      }`
+  finally(onfinally?: (() => void) | null): Promise<BoxedResponse<T, E>> {
+    return this.promise.finally(onfinally);
+  }
+
+  /* async bxrs combinators — applied the moment the promise fulfills */
+  unwrap(): Promise<T> {
+    return this.promise.then((response) => response.unwrap());
+  }
+
+  unwrapOr(fallback: T): Promise<T> {
+    return this.promise.then((response) =>
+      isBoxedError(response) ? fallback : response.data,
     );
   }
-  return response.data;
-}
 
-export function consumeOrNull<T, E extends string | number>(
-  response: BoxedResponse<T, E>
-): T | null {
-  if (isBoxedError(response)) {
-    return null;
+  unwrapOrElse(f: (err: IBoxedError<E>) => T): Promise<T> {
+    return this.promise.then((response) => response.unwrapOrElse(f));
   }
-  return response.data;
-}
 
-export function consumeOrCallback<T, E extends string | number>(
-  response: BoxedResponse<T, E>,
-  callback: (error: IBoxedError<E>) => T
-): T {
-  if (isBoxedError(response)) {
-    return callback(response);
+  expect(message: string): Promise<T> {
+    return this.promise.then((response) => response.expect(message));
   }
-  return response.data;
-}
 
-export function consumeUntilSuccess<T, E extends string | number>(
-  response: BoxedResponse<T, E>,
-  interval: number,
-  maxAttempts?: number
-): Promise<BoxedResponse<T, E>> {
-  maxAttempts = maxAttempts ?? 10; // Default to 10 attempts if not provided
-  return new Promise((resolve) => {
-    let attempts = 0;
+  toNullable(): Promise<T | null> {
+    return this.promise.then((response) => response.toNullable());
+  }
 
-    const intervalId = setInterval(() => {
-      if (isBoxedError(response)) {
-        if (maxAttempts && attempts >= maxAttempts) {
-          clearInterval(intervalId);
-          resolve(response);
-        } else {
-          attempts++;
-        }
-      } else {
-        clearInterval(intervalId);
-        resolve(response);
-      }
-    }, interval);
-  });
-}
-
-type IBoxedRetryOpts = {
-  intervalMs?: number;
-  timeoutMs?: number;
-};
-
-const DEFAULT_INTERVAL = 1000;
-const DEFAULT_TIMEOUT = 10000;
-export function retryOnBoxedError(timeOpts?: IBoxedRetryOpts) {
-  const interval = timeOpts?.intervalMs ?? DEFAULT_INTERVAL;
-  const timeout = timeOpts?.timeoutMs ?? DEFAULT_TIMEOUT;
-
-  return async function <T, E extends string | number>(
-    fn: () => Promise<BoxedResponse<T, E>>,
-    onRetry?: (attempt: number, err: BoxedError<E>, fnName: string) => void,
-    returnErrors: E[] = []
-  ): Promise<BoxedResponse<T, E>> {
-    const errorSet = new Set(returnErrors);
-    const start = Date.now();
-    let attempt = 0;
-
-    while (Date.now() - start < timeout) {
-      const res = await fn();
-      if (
-        !isBoxedError(res) ||
-        (isBoxedError(res) && errorSet.has(res.errorType)) //Will skip onretry aswell
-      )
-        return res;
-
-      onRetry?.(attempt, res, fn.name);
-      attempt++;
-      await new Promise((r) => setTimeout(r, interval));
-    }
-
-    return new BoxedError<E>(
-      "TimeoutError" as E,
-      `Function did not succeed within ${timeout} ms`
-    );
-  };
-}
-
-// -----------------------------------------------------------------------------
-// retryOrThrow  – timeOpts?  →  <T,E>(fn, onRetry?) => Promise<T>
-// -----------------------------------------------------------------------------
-export function retryOrThrow(timeOpts?: IBoxedRetryOpts) {
-  return async function <T, E extends string | number>(
-    fn: () => Promise<BoxedResponse<T, E>>,
-    onRetry?: (attempt: number, err: BoxedError<E>, fnName: string) => void
-  ): Promise<T> {
-    const resp = await retryOnBoxedError(timeOpts)<T, E>(fn, onRetry);
-    return consumeOrThrow(resp);
-  };
-}
-
-type SuccessPayload<T> =
-  T extends IBoxedSuccess<infer R> //  ← matches status: true
-    ? R
-    : never;
-
-/* ────────────────────────────────────────────────────────────── */
-/* 2.  Tuple-aware consumer — still zero `any`                    */
-/* ────────────────────────────────────────────────────────────── */
-
-export function consumeAll<
-  const T extends readonly BoxedResponse<unknown, string | number>[],
->(
-  tuple: T,
-  consumeFn: <U, E extends string | number>(
-    boxed: BoxedResponse<U, E>
-  ) => U = consumeOrThrow
-): { [K in keyof T]: SuccessPayload<T[K]> } {
-  // run the consumer for every element
-  const out = tuple.map(consumeFn);
-  // re-tag the array as the same-length tuple
-  return out as unknown as { [K in keyof T]: SuccessPayload<T[K]> };
+  /** The untouched inner promise, when a plain Promise type is needed. */
+  boxed(): Promise<BoxedResponse<T, E>> {
+    return this.promise;
+  }
 }

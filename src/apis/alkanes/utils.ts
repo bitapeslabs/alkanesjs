@@ -156,6 +156,46 @@ function deepHexToBigInt<T>(value: T): unknown {
   return value;
 }
 
+/**
+ * A trace as espo and the alkanes indexer write one, where every u128 is
+ * minimal **big-endian** hex (`format!("0x{:x}")` in `espo/src/alkanes/trace.rs`
+ * and `alkanes-support`'s `fmt_u128_hex`). `0xcf16` is 53014, not 5839.
+ *
+ * This is deliberately separate from `decodeAlkanesTrace`, which byte-reverses
+ * every hex string it finds. Both cannot be right about the same bytes; see
+ * `hexLEToBigInt` above.
+ */
+export function decodeTrace(
+  encoded: AlkanesTraceEncodedResult,
+): AlkanesTraceResult {
+  return deepBigEndianHex(encoded) as unknown as AlkanesTraceResult;
+}
+
+/**
+ * Every hex string read big-endian, except returndata, which stays a string.
+ *
+ * The exemption is only for the response's `data` — the raw bytes a call
+ * returned. An event's own `data` is its whole payload, so skipping every key
+ * named `data` would skip the entire trace.
+ */
+function deepBigEndianHex<T>(value: T): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => deepBigEndianHex(entry));
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] =
+        k === "data" && typeof v === "string" ? v : deepBigEndianHex(v as never);
+    }
+    return out;
+  }
+  if (typeof value === "string" && /^0x[0-9a-fA-F]+$/.test(value)) {
+    return BigInt(value);
+  }
+  return value;
+}
+
 export function decodeAlkanesTrace(
   encoded: AlkanesTraceEncodedResult,
 ): AlkanesTraceResult {

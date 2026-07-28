@@ -11,6 +11,7 @@ import {
   getProtostoneTransactionsWithInscription,
   getProtostoneUnsignedPsbtBase64,
   SingularTransfer,
+  TransactionAddressInput,
 } from "./psbt";
 
 export enum AlkanesExecuteError {
@@ -38,7 +39,7 @@ export const execute = async ({
   signPsbt,
 }: {
   provider: Provider;
-  address: string;
+  address: TransactionAddressInput;
   callData: bigint[];
   signPsbt: (unsignedPsbtBase64: string) => Promise<string>;
   feeRate?: number;
@@ -71,10 +72,12 @@ export const execute = async ({
     return new BoxedSuccess(inscriptionTransactions);
   } catch (err) {
     console.error("Alkanes execute error:", err);
-    return new BoxedError(AlkanesExecuteError.UnknownError, (err as Error)?.message ?? "Unknown Error");
+    return new BoxedError((err as Error)?.message ?? "Unknown Error", AlkanesExecuteError.UnknownError);
   }
 };
 
 export * from "./types";
 export * from "./utils";
 export * from "./psbt";
+export * from "./account";
+export * from "./deploy";

@@ -1,6 +1,14 @@
 import { z } from "zod";
 import { BorshSchema, Infer as BorshInfer } from "borsher";
 
+/*
+  borsher, re-exported: consumers building calldata (deploy constructor
+  arguments, borsh-typed method params) need the schema builder itself, and
+  reaching around the SDK for the same copy it uses is not their job.
+*/
+export { BorshSchema, borshSerialize, borshDeserialize } from "borsher";
+export type { Infer as BorshInfer } from "borsher";
+
 // 2^128 − 1  (all bits set in a 128-bit register)
 const MAX_U128 = (1n << 128n) - 1n;
 

@@ -74,6 +74,9 @@ import {
   EspoGetPoolsResult,
   EspoGetPoolsRpcOk,
   EspoGetPoolsRpcResult,
+  EspoGetSubfrostSignerOk,
+  EspoGetSubfrostSignerResult,
+  EspoGetSubfrostSigner,
   EspoFindBestSwapPathParams,
   EspoFindBestSwapPath,
   EspoFindBestSwapPathOk,
@@ -86,6 +89,14 @@ import {
   EspoGetBestMevSwapResult,
   EspoGetBestMevSwapRpcOk,
   EspoGetBestMevSwapRpcResult,
+  EspoSubmitPackageResult,
+  EspoAlkabiFormat,
+  EspoGetAlkabi,
+  EspoGetAlkabiOk,
+  EspoGetAlkabiResult,
+  EspoGetAlkaneTxSummary,
+  EspoGetAlkaneTxSummaryOk,
+  EspoGetAlkaneTxSummaryResult,
 } from "./types";
 import { RpcCall } from "./utils/jsonrpc";
 import { stripFields } from "./utils";
@@ -590,6 +601,65 @@ export class Espo {
     };
 
     return Ok<EspoGetTrades, string>(normalized);
+  }
+
+  /**
+   * subfrost.get_signer: the frBTC signer read from the indexed `/signer`
+   * storage slot of alkane 32:0. A pure data read against espo's index, NOT a
+   * contract simulation, so it works on every espo endpoint.
+   */
+  public async getSubfrostSigner(): Promise<
+    BoxedResponse<EspoGetSubfrostSigner, string>
+  > {
+    return this.callAndUnbox<
+      EspoGetSubfrostSignerOk,
+      EspoGetSubfrostSignerResult
+    >("subfrost.get_signer", {});
+  }
+
+  /**
+   * `btc.submit_package`: hand a dependent set of raw transactions (a CPFP
+   * pair — commit + reveal, parent + child) to Bitcoin Core's `submitpackage`
+   * in one call. Unlike broadcasting them one by one, the package is judged
+   * on its COMBINED fee rate, so a parent paying under the mempool minimum
+   * still relays when the child covers the deficit. Order matters: parents
+   * before the children that spend them.
+   */
+  public submitPackage(
+    txsHex: string[]
+  ): Promise<BoxedResponse<EspoSubmitPackageResult, string>> {
+    return RpcCall<EspoSubmitPackageResult>(this.rpc_url, "btc.submit_package", {
+      txs: txsHex,
+    }).call();
+  }
+
+  /**
+   * `essentials.get_alkane_tx_summary`: what a transaction's protostones did,
+   * per outpoint, as espo indexed them — including the `create` event a
+   * deployment leaves, which is where a fresh contract's alkane id comes from.
+   */
+  public getAlkaneTxSummary(
+    txid: string
+  ): Promise<BoxedResponse<EspoGetAlkaneTxSummary, string>> {
+    return this.callAndUnbox<
+      EspoGetAlkaneTxSummaryOk,
+      EspoGetAlkaneTxSummaryResult
+    >("essentials.get_alkane_tx_summary", { txid });
+  }
+
+  /**
+   * `essentials.get_alkabi`: the self-describing ABI of a deployed contract,
+   * extracted from its wasm's `__meta` export. `"json"` answers with the
+   * alkabi document, `"ts"` with the rendered TypeScript module.
+   */
+  public getAlkabi(
+    alkane: EspoAlkaneId,
+    format: EspoAlkabiFormat = "json"
+  ): Promise<BoxedResponse<EspoGetAlkabi, string>> {
+    return this.callAndUnbox<EspoGetAlkabiOk, EspoGetAlkabiResult>(
+      "essentials.get_alkabi",
+      { alkane, format }
+    );
   }
 
   public async getPools(

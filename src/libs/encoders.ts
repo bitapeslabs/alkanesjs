@@ -76,40 +76,40 @@ export class Encodable<T = unknown> {
     return {
       string: (data) => {
         if (typeof data !== "string") {
-          return new BoxedError(EncodeError.InvalidPayload, "Payload must be a string");
+          return new BoxedError("Payload must be a string", EncodeError.InvalidPayload);
         }
         return new BoxedSuccess(encodeStringToU128Array(data));
       },
 
       bigint: (data) => {
         if (typeof data !== "bigint") {
-          return new BoxedError(EncodeError.InvalidPayload, "Payload must be a bigint");
+          return new BoxedError("Payload must be a bigint", EncodeError.InvalidPayload);
         }
         return new BoxedSuccess([data]);
       },
 
       name: (data) => {
         if (typeof data !== "string") {
-          return new BoxedError(EncodeError.InvalidPayload, "Payload must be a string");
+          return new BoxedError("Payload must be a string", EncodeError.InvalidPayload);
         }
         const arr = encodeStringToU128Array(data);
-        if (arr.length > 2) return new BoxedError(EncodeError.NameTooLong);
+        if (arr.length > 2) return new BoxedError(undefined, EncodeError.NameTooLong);
         if (arr.length === 1) arr.push(0n); // right-pad
         return new BoxedSuccess(arr);
       },
 
       char: (data) => {
         if (typeof data !== "string") {
-          return new BoxedError(EncodeError.InvalidPayload, "Payload must be a string");
+          return new BoxedError("Payload must be a string", EncodeError.InvalidPayload);
         }
         const arr = encodeStringToU128Array(data);
-        if (arr.length > 1) return new BoxedError(EncodeError.CharTooLong);
+        if (arr.length > 1) return new BoxedError(undefined, EncodeError.CharTooLong);
         return new BoxedSuccess(arr);
       },
 
       object: (data, schema) => {
         if (!schema) {
-          return new BoxedError(EncodeError.BorshMissing, "Missing Borsh schema");
+          return new BoxedError("Missing Borsh schema", EncodeError.BorshMissing);
         }
         const bytes = borshSerialize(schema, data);
         return new BoxedSuccess(encodeBytesToU128Array(bytes));

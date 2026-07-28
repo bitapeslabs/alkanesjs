@@ -103,10 +103,7 @@ export class AlkanesRpcProvider {
           let decoded = decodeAlkanesTrace(encoded);
 
           if (decoded.length === 0) {
-            return new BoxedError(
-              AlkanesTraceError.NoTraceFound,
-              "No trace found for the given txid and vout",
-            );
+            return new BoxedError("No trace found for the given txid and vout", AlkanesTraceError.NoTraceFound);
           }
 
           let returnEvent = decoded.findLast(
@@ -118,10 +115,7 @@ export class AlkanesRpcProvider {
           );
 
           if (!returnEvent || !encodedReturnEvent) {
-            return new BoxedError(
-              AlkanesTraceError.DecodeError,
-              "No return event found in alkanes trace",
-            );
+            return new BoxedError("No return event found in alkanes trace", AlkanesTraceError.DecodeError);
           }
 
           let isError = returnEvent?.data.status !== "success"; //errors if the return event isnt found or status is revert
@@ -138,18 +132,12 @@ export class AlkanesRpcProvider {
               errorMessage = "Unknown error decoding alkanes trace";
             }
 
-            return new BoxedError(
-              AlkanesTraceError.TransactionReverted,
-              `Transaction reverted with message: ${errorMessage}`,
-            );
+            return new BoxedError(`Transaction reverted with message: ${errorMessage}`, AlkanesTraceError.TransactionReverted);
           }
 
           return new BoxedSuccess(decoded);
         } catch (err) {
-          return new BoxedError(
-            AlkanesTraceError.DecodeError,
-            (err as Error).message ?? "Unknown error decoding alkanes trace",
-          );
+          return new BoxedError((err as Error).message ?? "Unknown error decoding alkanes trace", AlkanesTraceError.DecodeError);
         }
       },
     };
@@ -209,10 +197,7 @@ export class AlkanesRpcProvider {
 
     if (isBoxedError(res)) return res;
     if (res.data.execution.error) {
-      return new BoxedError(
-        AlkanesSimulationError.TransactionReverted,
-        res.data.execution.error,
-      );
+      return new BoxedError(res.data.execution.error, AlkanesSimulationError.TransactionReverted);
     }
 
     return new BoxedSuccess({
@@ -224,3 +209,4 @@ export class AlkanesRpcProvider {
 
 export * from "./types";
 export * from "./utils";
+export * from "./simtx";

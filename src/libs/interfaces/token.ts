@@ -32,10 +32,7 @@ export const TokenABI = abi.contract({
   ) {
     const parsed = paramSchema.safeParse(params.tokenParams);
     if (!parsed.success) {
-      return new BoxedError(
-        AlkanesExecuteError.InvalidParams,
-        `Invalid parameters: ${parsed.error.message}`,
-      );
+      return new BoxedError(`Invalid parameters: ${parsed.error.message}`, AlkanesExecuteError.InvalidParams);
     }
 
     const nameEncoded = consumeOrThrow(
@@ -94,10 +91,7 @@ export const TokenABI = abi.contract({
 
         return new BoxedSuccess(balances[target] ?? 0);
       } catch (err) {
-        return new BoxedError(
-          AlkanesFetchError.UnknownError,
-          `Failed to fetch balance: ${(err as Error).message}`,
-        );
+        return new BoxedError(`Failed to fetch balance: ${(err as Error).message}`, AlkanesFetchError.UnknownError);
       }
     }),
 });

@@ -1,6 +1,6 @@
 {
   "name": "alkanesjs",
-  "version": "1.2.9",
+  "version": "1.2.8",
   "description": "An expressive CLI toolset for Alkanes mantained by Bitapes Labs",
   "license": "ISC",
   "type": "commonjs",
@@ -8,7 +8,8 @@
     "boyl": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "wallets"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.browser.mjs",
@@ -17,10 +18,19 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "browser": "./dist/index.browser.mjs",
       "import": "./dist/index.browser.mjs",
       "require": "./dist/index.js",
       "default": "./dist/index.browser.mjs"
     },
+    "./wallets": {
+      "types": "./dist/wallets.d.ts",
+      "browser": "./dist/wallets.mjs",
+      "import": "./dist/wallets.mjs",
+      "require": "./dist/wallets.js",
+      "default": "./dist/wallets.mjs"
+    },
+    "./wallets/package.json": "./wallets/package.json",
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -40,6 +50,7 @@
     "bignumber.js": "^9.3.0",
     "bip32": "^5.0.0-rc.0",
     "bip322-js": "^3.0.0",
+    "bip39": "^3.1.0",
     "bitcoinjs-lib": "^6.1.7",
     "borsher": "^4.0.0",
     "bxrs": "^1.0.0",
@@ -69,6 +80,7 @@
     "path-browserify": "^1.0.1",
     "rollup": "^4.44.1",
     "rollup-plugin-dts": "^6.2.1",
-    "tsc-alias": "^1.8.16"
+    "tsc-alias": "^1.8.16",
+    "typescript": "^6.0.3"
   }
 }
