@@ -13,6 +13,14 @@ import {
   type BlockResults,
 } from "@/libs/alkanes/account";
 import {
+  decodeSimulateBlockResponse,
+  decodeSimulateTransactionResponse,
+  encodeSimulateBlockRequest,
+  encodeSimulateTransactionRequest,
+  type SimulatedBlock,
+  type SimulatedTransaction,
+} from "@/apis/alkanes/simtx";
+import {
   retryOnBoxedError,
   BoxedResponse,
   BoxedSuccess,
@@ -37,7 +45,6 @@ import { AlkanesSimulationError } from "./libs";
 import { setFetchDebug } from "./debug";
 
 interface ProviderConfigBase {
-  electrumApiUrl: string;
   network: BitcoinNetwork;
   explorerUrl: string;
   defaultFeeRate?: number;
@@ -52,17 +59,16 @@ interface ProviderConfigBase {
 }
 
 /**
- * Where the provider's JSON-RPC goes. The normal shape is a single `kirbyUrl`
- * — kirby serves metashrew/alkanes/esplora methods on `/rpc` and espo on
- * `/espo`, so both endpoints derive from it. The split `sandshrewUrl` +
- * `espoUrl` form remains for talking to the upstreams directly (comparison
- * runs, or environments without a kirby).
+ * Where the provider's JSON-RPC goes. `metashrewUrl` is any endpoint speaking
+ * the metashrew/alkanes methods — a kirby's `/rpc`, a sandshrew-style gateway,
+ * subfrost — they all answer the same contract, which is the point: the SDK
+ * targets the standard API and the URL decides who serves it. `espoUrl` is
+ * espo's own getters (a kirby's `/espo`, or espo directly).
  */
-export type ProviderConfig = ProviderConfigBase &
-  (
-    | { kirbyUrl: string; sandshrewUrl?: never; espoUrl?: never }
-    | { sandshrewUrl: string; espoUrl?: string; kirbyUrl?: never }
-  );
+export type ProviderConfig = ProviderConfigBase & {
+  metashrewUrl: string;
+  espoUrl?: string;
+};
 
 enum AlkanesPollError {
   UnknownError = "UnknownError",
@@ -80,8 +86,7 @@ export type AlkanesParsedTraceResult = {
 };
 
 export class Provider {
-  readonly sandshrewUrl: string;
-  readonly electrumApiUrl: string;
+  readonly metashrewUrl: string;
   readonly espoUrl?: string;
   readonly network: BitcoinNetwork;
   readonly explorerUrl: string;
@@ -98,15 +103,8 @@ export class Provider {
   public pacer: WaitPacer;
 
   constructor(config: ProviderConfig) {
-    if (config.kirbyUrl) {
-      const kirby = config.kirbyUrl.replace(/\/+$/, "");
-      this.sandshrewUrl = `${kirby}/rpc`;
-      this.espoUrl = `${kirby}/espo`;
-    } else {
-      this.sandshrewUrl = config.sandshrewUrl!;
-      this.espoUrl = config.espoUrl;
-    }
-    this.electrumApiUrl = config.electrumApiUrl;
+    this.metashrewUrl = config.metashrewUrl;
+    this.espoUrl = config.espoUrl;
     this.network = config.network;
     this.explorerUrl = config.explorerUrl.replace(/\/+$/, "");
     this.btcTicker = config.btcTicker ?? "BTC";
@@ -136,7 +134,7 @@ export class Provider {
   }
 
   buildRpcCall<T>(method: string, params: unknown[] = []): RpcCall<T> {
-    return sandshrewBuildRpcCall<T>(method, params, this.sandshrewUrl);
+    return sandshrewBuildRpcCall<T>(method, params, this.metashrewUrl);
   }
 
   execute(
@@ -162,14 +160,15 @@ export class Provider {
    * simulated is the transaction rather than a description of one.
    *
    *     const [before, , after] = await provider.simulateBlock([
-   *       alice.tx().call(pool).getReserves().unwrap(),
-   *       alice.tx().call(pool).swap(args, pays),
-   *       alice.tx().call(pool).getReserves().unwrap(),
+   *       alice.tx().call(pool, "getReserves").unwrap(),
+   *       alice.tx().transfer(TOKEN_0, amountIn, 1).call(pool, "swap", args),
+   *       alice.tx().call(pool, "getReserves").unwrap(),
    *     ]);
    *
-   * Needs kirby — `kirby_simulateblock`; a bare metashrew has no notion of a
-   * chunk, which is why this hangs off the provider rather than off a
-   * transaction: the endpoint is the provider's to know.
+   * Goes out as `alkanes_simulateblock` — the transactions wrapped in a block,
+   * which is the authoritative way to ask this. It hangs off the provider
+   * rather than off a transaction because a chunk is nobody's transaction in
+   * particular, and the endpoint is the provider's to know.
    */
   simulateBlock<T extends readonly AlkaneTx<any, any>[]>(
     // `[...T]` rather than `T`: it makes the array literal infer as a tuple, so
@@ -177,6 +176,92 @@ export class Provider {
     txs: readonly [...T],
   ): Promise<BlockResults<T>> {
     return runSimulatedBlock(this, txs);
+  }
+
+  /**
+   * Simulate one raw transaction — signed or not, since nothing here checks a
+   * signature — via `alkanes_simulatetransaction`, the metashrew view for
+   * exactly this question. kirby answers tip-state requests itself and hands
+   * anything else to metashrew, so this call behaves identically against
+   * either endpoint; kirby is just the fast way to ask.
+   */
+  async simulateTransaction(
+    txHex: string,
+    era?: number,
+  ): Promise<SimulatedTransaction> {
+    const result = await this.protobufView(
+      "alkanes_simulatetransaction",
+      (tip) => encodeSimulateTransactionRequest(txHex, tip),
+      era,
+    );
+    return decodeSimulateTransactionResponse(result);
+  }
+
+  /** The height the endpoint has indexed to. */
+  async height(): Promise<number> {
+    return Number(consumeOrThrow(await this.rpc.alkanes.alkanes_metashrewHeight().call()));
+  }
+
+  /**
+   * Simulate a whole consensus-encoded block — `alkanes_simulateblock`, the
+   * same view for a block that `simulateTransaction` is for a transaction.
+   * Every transaction runs in order against one shared state, so each sees
+   * what the ones before it did. `simulateBlock` is the ergonomic way in;
+   * this is here for callers holding block bytes already.
+   */
+  async simulateRawBlock(
+    blockHex: string,
+    era?: number,
+  ): Promise<SimulatedBlock> {
+    const result = await this.protobufView(
+      "alkanes_simulateblock",
+      (tip) => encodeSimulateBlockRequest(blockHex, tip),
+      era,
+    );
+    return decodeSimulateBlockResponse(result);
+  }
+
+  /**
+   * One of the hex-protobuf metashrew views, asked at the current era.
+   *
+   * The height in these requests selects the consensus era, not the state —
+   * passing 0 means pre-genesis rules and nothing modern survives them. So ask
+   * the endpoint where its tip is first; one small call, and it makes the
+   * request correct against bare metashrew and kirby alike.
+   *
+   * `era` overrides that, for the one case where the endpoint's own answer is
+   * the wrong one: asking two endpoints the same question. They index
+   * independently and are routinely a block apart, so letting each pick its
+   * own tip means comparing answers from two different eras.
+   */
+  private async protobufView(
+    method: string,
+    request: (tip: number) => string,
+    era?: number,
+  ): Promise<string> {
+    const ask = (body: unknown) =>
+      fetch(this.metashrewUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((r) => r.json() as Promise<any>);
+
+    const tip =
+      era ??
+      Number(
+        (await ask({ jsonrpc: "2.0", id: 1, method: "metashrew_height", params: [] }))
+          ?.result ?? 0,
+      );
+    const json = await ask({
+      jsonrpc: "2.0",
+      id: 1,
+      method,
+      params: [request(tip)],
+    });
+    if (json?.error || typeof json?.result !== "string") {
+      throw new Error(json?.error?.message ?? `${method} failed`);
+    }
+    return json.result;
   }
 
   simulate(

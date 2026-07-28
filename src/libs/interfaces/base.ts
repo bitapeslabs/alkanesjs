@@ -373,7 +373,7 @@ export abstract class AlkanesBaseContract {
 
     if (entries.length > 0) {
       try {
-        const res = await fetch(this.provider.sandshrewUrl, {
+        const res = await fetch(this.provider.metashrewUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(entries.map((e) => e.body)),

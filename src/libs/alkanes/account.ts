@@ -8,14 +8,22 @@
     const alice = new AlkanesAccount({ provider, address });
 
     const tx = alice.tx()
-      .call(pool).swap(args, send => send(TOKEN_0, amountIn))
-      .transfer(TOKEN_1, amount, bob);
+      .transfer(TOKEN_0, amountIn, 1)        // pay the swap — shadow vout 1
+      .call(pool, "swap", args)              // typed off the ABI
+      .transfer(TOKEN_1, amount, bob);       // pay a person
+
+  The only numbers here are SHADOW indices — 0 is the transfer
+  stone itself, 1 the first call, never a real vout. Real outputs
+  are reached by address,
+  and the builder decides the real layout. A call's result and its
+  refund come home to the sender unless `shadowPointer` aims them at
+  a later stone, which is how one call pays for the next.
 
   Each transaction really is a Bitcoin transaction: inputs chosen
   from what the account can spend, outputs, and an OP_RETURN
-  carrying the protostones. Chaining them with `.and()` makes a
-  block, which goes to `kirby_simulateblock` as raw transaction
-  hex — the same bytes a node would see.
+  carrying the protostones. A list of them goes to
+  `alkanes_simulateblock` wrapped in a block — the same bytes a node
+  would see.
 
   An account holding a key finalizes its transactions with real
   signatures. One that doesn't finalizes with placeholder witnesses
@@ -34,7 +42,8 @@ import type {
   AlkanesTraceEncodedResult,
   AlkanesTraceResult,
 } from "@/apis/alkanes/types";
-import { decodeTrace } from "@/apis/alkanes/utils";
+import { decodeTrace, extractAbiErrorMessage } from "@/apis/alkanes/utils";
+import { blockOf, type SimulatedTransaction } from "@/apis/alkanes/simtx";
 import type { AlkabiDocument } from "../alkabi/types";
 import type { InferAlkabiIo } from "../alkabi/infer";
 import {
@@ -193,30 +202,92 @@ export interface AlkaneAmount {
   amount: bigint;
 }
 
-/** What a call is paid with — one alkane, or several. */
-export type Pays = AlkaneAmount | readonly AlkaneAmount[];
-
-const isAmount = (value: unknown): value is AlkaneAmount =>
-  value !== null &&
-  typeof value === "object" &&
-  "id" in value &&
-  "amount" in value;
-
 /**
- * Whether a first argument is really the payment. A method taking no argument
- * can still be paid, so `.forwardIncoming({ id, amount })` has to be told apart
- * from a method whose own argument sits in that slot.
+ * BTC as the sats it is. Bitcoin has no unit below a sat, so an amount that
+ * does not land on one is a mistake worth hearing about rather than rounding
+ * away — `0.000000005` is either a typo or a misunderstanding, and silently
+ * sending 1 sat helps with neither.
+ *
+ * The comparison allows a little slack because `0.0001 * 1e8` is not exactly
+ * `10000` in binary floating point, and refusing that would be absurd.
  */
-function isPays(value: unknown): value is Pays {
-  return Array.isArray(value) ? value.every(isAmount) : isAmount(value);
-}
+const satsOf = (btc: number): number => {
+  const raw = btc * 1e8;
+  const sats = Math.round(raw);
+  if (Math.abs(raw - sats) > 1e-3) {
+    throw new Error(
+      `tx: ${btc} BTC is ${raw} sats, which is not a whole number of them`,
+    );
+  }
+  return sats;
+};
 
-const toSends = (pays?: Pays): AlkaneAmount[] =>
-  !pays ? [] : Array.isArray(pays) ? [...pays] : [pays as AlkaneAmount];
+/*------------------------------------------------------------*
+ | Shadow space — how a transaction talks about itself         |
+ *------------------------------------------------------------*/
 
 /*
-  The methods `.call(contract)` offers: the contract's own, each taking its
-  declared argument and, optionally, what to pay it with.
+  The only vout numbers this API accepts are SHADOW indices, counted over the
+  protostones themselves: `0` is the transfer stone — the first shadow vout —
+  `1` the first `.call()` or `.protostone()`, `2` the second, and so on. Real
+  vouts are never addressable by number — an address is how you reach a real
+  output, and the builder decides the real layout (dust output, recipient
+  outputs, change), which is exactly why a hand-written number for one could
+  never be right.
+
+  On the wire, shadow index `n` is `real_outputs + 1 + n`. The builder does
+  that arithmetic; nothing here ever needs to. Index 0 is addressable in
+  principle but never a useful target: the transfer stone is the thing doing
+  the aiming, and it has already settled by the time anything else runs.
+*/
+
+/** An alkane aimed at a shadow vout. */
+export interface ShadowEdict {
+  id: AlkaneId;
+  amount: bigint;
+  /** The shadow index that receives it — `1` is the first call. */
+  to: number;
+}
+
+/**
+ * Per-stone overrides. Everything is shadow-indexed; left alone, a stone's
+ * result and its refund both go back to the sender's alkanes output.
+ */
+export interface StoneSettings {
+  /** Moves made when this stone settles, into later stones' shadow vouts. */
+  shadowEdicts?: readonly ShadowEdict[];
+  /** Where this stone's result goes: a later stone's shadow index. */
+  shadowPointer?: number;
+  /** Where its incoming goes on revert: a later stone's shadow index. */
+  shadowRefund?: number;
+}
+
+/** A raw protostone: `StoneSettings` plus an arbitrary message. */
+export interface RawStoneSettings extends StoneSettings {
+  /** The message words, as they ride the runestone. Empty means no message. */
+  message?: readonly bigint[];
+}
+
+const SETTING_KEYS = ["shadowEdicts", "shadowPointer", "shadowRefund"];
+
+/**
+ * Whether a `.call()` argument slot holds the settings. A method taking no
+ * argument can still carry settings, so `{ shadowPointer: 1 }` has to be told
+ * apart from a method whose own argument sits in that slot — no alkabi input
+ * is an object made only of these keys.
+ */
+function isSettings(value: unknown): value is StoneSettings {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  return keys.length > 0 && keys.every((k) => SETTING_KEYS.includes(k));
+}
+
+/*
+  What `.call(contract, method, …)` knows about the contract: its alkabi
+  document, which is where the method-name union and each method's argument
+  type come from.
 */
 type ArgOf<M, T extends AlkabiDocument["types"]> = M extends { input: infer I }
   ? [arg: InferAlkabiIo<I, T>]
@@ -226,13 +297,22 @@ type OutOf<M, T extends AlkabiDocument["types"]> = M extends { output: infer O }
   ? InferAlkabiIo<O, T>
   : Uint8Array;
 
-export type TxCalls<D> = D extends AlkabiDocument
-  ? {
-      [M in D["methods"][number] as M["name"] & string]: (
-        ...args: [...ArgOf<M, D["types"]>, pays?: Pays]
-      ) => AlkaneTx<OutOf<M, D["types"]>>;
-    }
-  : Record<string, (arg?: unknown, pays?: Pays) => AlkaneTx<unknown>>;
+type DocMethods<D> = D extends AlkabiDocument ? D["methods"][number] : never;
+
+/** The names `.call()` accepts for a contract — its own methods. */
+export type MethodNameOf<D> = D extends AlkabiDocument
+  ? DocMethods<D>["name"] & string
+  : string;
+
+type MethodByName<D, N> = Extract<DocMethods<D>, { name: N }>;
+
+type CallRest<D, N> = D extends AlkabiDocument
+  ? [...ArgOf<MethodByName<D, N>, D["types"]>, settings?: StoneSettings]
+  : [arg?: unknown, settings?: StoneSettings];
+
+type CallOut<D, N> = D extends AlkabiDocument
+  ? OutOf<MethodByName<D, N>, D["types"]>
+  : Uint8Array;
 
 /** How a transaction's slot in a block resolves. */
 type SlotMode =
@@ -242,33 +322,36 @@ type SlotMode =
   | { kind: "unwrapOr"; fallback: unknown }
   | { kind: "toNullable" };
 
-interface PlannedCall {
-  contract: CallableContract;
-  method: string;
-  arg?: unknown;
-  sends: AlkaneAmount[];
-  /** Which output this call's result lands on. Defaults to the alkanes output. */
-  pointer?: number;
-  /** Where its incoming goes if it reverts. Defaults to change. */
-  refund?: number;
-  /** Hand what this call returned to the next call instead of to an output. */
-  carry?: boolean;
-}
+/** One protostone of the chain: a contract call, or a raw stone. */
+type ChainStone =
+  | {
+      kind: "call";
+      contract: CallableContract;
+      method: string;
+      arg?: unknown;
+      settings: StoneSettings;
+    }
+  | { kind: "raw"; message: bigint[]; settings: StoneSettings };
 
-/** An alkane handed to someone, as a plain move. */
+/** An alkane moved by the transfer stone: to a person, or into a chain stone. */
 interface Handoff {
   id: AlkaneId;
   amount: bigint;
-  address: string;
+  /** Exactly one of these: a recipient's address, or a shadow index. */
+  address?: string;
+  shadow?: number;
 }
 
-/** An outpoint this transaction spends that is not on chain yet. */
+/** Outputs of an unmined transaction that this one spends. */
 interface PendingInput {
-  /** The transaction itself, or its position in the block being simulated. */
-  from: AlkaneTx<any, any> | number;
-  vout: number;
-  /** What it holds, when the transaction producing it can't say by itself. */
-  holds?: readonly AlkaneAmount[];
+  /** The transaction whose outputs are spent. */
+  from: AlkaneTx<any, any>;
+  /**
+   * Which of the spender's outputs of that transaction: the default sweeps
+   * every alkane-bearing one, a number picks the n-th output that belongs to
+   * the spender, in vout order.
+   */
+  selector: number | "all";
 }
 
 /** A transaction after it has been built: real bytes, with a real txid. */
@@ -278,9 +361,15 @@ export interface BuiltTx {
   /**
    * What this transaction's own edicts put on each real output. Known because
    * we wrote them — a call's result is not, since only the simulation knows
-   * how much it returned; say that with `.spending(tx, vout, holds)`.
+   * how much it returned.
    */
   holds: Map<number, AlkaneAmount[]>;
+  /**
+   * The alkanes output the builder keeps for the sender — where results,
+   * refunds and leftovers land by default. `null` for a transaction that
+   * carried no protostones and so never made one.
+   */
+  home: number | null;
   /** False when the account had no key and the witnesses are placeholders. */
   signed: boolean;
   psbtBase64: string;
@@ -320,24 +409,24 @@ export interface TxOutcome {
 /**
  * One Bitcoin transaction under construction.
  *
- * Steps run in the order they were chained. Each call becomes its own
- * protostone, and the runtime settles protostones in order, so `.swap()` really
- * does happen before the `.unwrap()` chained after it. Transfers come last and
- * a call cannot follow one — they settle from what the transaction is left
- * holding, so putting a call after one would be a lie about the order.
+ * Every transaction has the same shape: a TRANSFER protostone first, then one
+ * stone per `.call()` / `.protostone()` in chain order.
  *
- * The alkanes flow through those stones:
+ *   inputs → transfer stone —edicts→ calls' shadow vouts → … → outputs
  *
- *   inputs → stone 0 (the router) → each call's shadow vout → … → outputs
+ * The transfer stone leads because protorune hands everything riding on the
+ * inputs to the first stone — so it is the one stone that has anything to
+ * route, and routing is all it does. Its edicts are the `.transfer()`s:
+ * paying a call and paying a person are the same move, aimed at a shadow
+ * index or an address. Its own pointer and refund are the sender's alkanes
+ * output, so whatever nothing claims comes home.
  *
- * Everything riding on the inputs is auto-allocated to the first stone, which
- * is the only place from which anything can be aimed. The router pays each call
- * exactly what `.swap(args, pays)` named — nothing else reaches it. A call's
- * result then lands on the alkanes output, or, with `.carry()`, in the next
- * call's shadow vout, which is how one call pays for the next.
+ * Calls settle in chain order after it. A call's result and its refund also
+ * default home to the sender; `shadowPointer` aims a result at a later stone
+ * instead — which is how one call pays for the next.
  */
 export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
-  private readonly calls: PlannedCall[] = [];  // read by the `.call()` proxy
+  private readonly chain: ChainStone[] = [];
   private readonly handoffs: Handoff[] = [];
   private readonly payments: { address: string; sats: number }[] = [];
   private readonly pending: PendingInput[] = [];
@@ -393,122 +482,143 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
   }
 
   /**
-   * Aim at a contract, then name the method — the methods are the contract's
-   * own, so this is where its ABI shows up:
+   * Call a contract method — its own protostone, settling in chain order:
    *
-   *     .call(pool).swap(args, { id: TOKEN_0, amount: amountIn })
+   *     .call(pool, "swap", swapArgs)
+   *     .call(pool, "getReserves")
    *
-   * The second argument says what the call is paid with — one alkane or a list
-   * of them. Those alkanes reach the call and nothing else does.
+   * The method name is the contract's to offer: it autocompletes off the ABI,
+   * and the argument is typed per method. Paying a call is not done here —
+   * `.transfer(asset, amount, shadowIndex)` aims what the transaction brought
+   * in at this call's shadow vout.
+   *
+   * The trailing settings override the stone's raw fields:
+   *
+   *     .call(pool, "swap", args, { shadowPointer: 2 })   // result feeds stone 2
    */
-  call<D>(contract: CallableContract<D>): TxCalls<D> {
-    if (this.handoffs.length > 0 || this.payments.length > 0) {
-      throw new Error(
-        "tx: a call cannot follow a transfer — transfers settle from what the " +
-          "transaction is left holding, so they always come last",
-      );
-    }
-    const tx = this;
-    return new Proxy(Object.create(null), {
-      get(_target, method) {
-        if (typeof method !== "string") return undefined;
-        return (arg?: unknown, pays?: Pays) => {
-          // a method taking no argument is still allowed to be paid
-          const [realArg, realPays] =
-            arg !== undefined && isPays(arg)
-              ? [undefined, arg as Pays]
-              : [arg, pays];
-          tx.calls.push({
-            contract: contract as CallableContract,
-            method,
-            arg: realArg,
-            sends: toSends(realPays),
-          });
-          return tx;
-        };
-      },
-    }) as TxCalls<D>;
+  call<D, N extends MethodNameOf<D>>(
+    contract: CallableContract<D>,
+    method: N,
+    ...rest: CallRest<D, N>
+  ): AlkaneTx<CallOut<D, N>, Slot extends TxOutcome ? TxOutcome : Slot> {
+    const [first, second] = rest as [unknown?, StoneSettings?];
+    const [arg, settings] =
+      second === undefined && isSettings(first)
+        ? [undefined, first]
+        : [first, second];
+    this.chain.push({
+      kind: "call",
+      contract: contract as CallableContract,
+      method,
+      arg,
+      settings: settings ?? {},
+    });
+    return this as unknown as AlkaneTx<
+      CallOut<D, N>,
+      Slot extends TxOutcome ? TxOutcome : Slot
+    >;
   }
 
-  /** Where the last call's result is allocated (default: the alkanes output). */
-  pointer(vout: number): this {
-    this.requireCall("pointer").pointer = vout;
+  /**
+   * A raw protostone, for saying something no verb here says: an arbitrary
+   * message, edicts, a pointer — all shadow-indexed, all optional.
+   *
+   *     .protostone({ message: [2n, 0n, 77n] })
+   */
+  protostone(settings: RawStoneSettings = {}): this {
+    const { message, ...rest } = settings;
+    this.chain.push({ kind: "raw", message: [...(message ?? [])], settings: rest });
     return this;
   }
 
   /**
-   * Hand what the last call returned to the next one instead of to an output:
+   * Move an alkane. The recipient is an address — a person — or a shadow
+   * index — one of this transaction's own calls. Paying a person and paying a
+   * contract are the same move:
    *
-   *     .call(pool).swap(args, pays).carry().call(frbtc).unwrap(args)
+   *     .transfer(TOKEN_0, 100_000n, 1)     // pay the first call — shadow vout 1
+   *     .transfer(TOKEN_1, amount, bob)     // pay bob — an edict to his output
+   *     .transfer("sats", 10_000n, bob)     // 10,000 sats
+   *     .transfer("btc", 0.0001, bob)       // the same, said the other way
    *
-   * The swap's output becomes what the unwrap is paid with, without ever
-   * touching a real output. Under the hood the call points at the next stone's
-   * shadow vout, which is where a protostone's incoming comes from.
+   * Every transfer is an edict on the transaction's first protostone — the
+   * transfer stone — which is where everything riding on the inputs lands,
+   * and therefore the one place anything can be aimed from. That is also why
+   * a transfer cannot move a call's result: the routing has already happened
+   * by the time any call runs.
+   *
+   * Bitcoin comes in two spellings because both get used and neither reads as
+   * the other: sats are whole, so they are a bigint like an alkane amount, and
+   * BTC is decimal, so it is a number. Sats go to people, not to shadow vouts
+   * — a shadow vout is not an output and cannot hold them.
    */
-  carry(): this {
-    this.requireCall("carry").carry = true;
-    return this;
-  }
-
-  /** Where the last call's incoming goes if it reverts (default: change). */
-  refund(vout: number): this {
-    this.requireCall("refund").refund = vout;
-    return this;
-  }
-
-  /**
-   * Hand something to someone. No contract runs — an alkane simply moves to an
-   * output that recipient controls, which is how one holder pays another.
-   *
-   *     .transfer(TOKEN_1, amount, bob)   // alkanes
-   *     .transfer(10_000, bob)            // sats
-   */
-  transfer(sats: number, to: AlkanesAccount | string): this;
-  transfer(asset: AlkaneId, amount: bigint, to: AlkanesAccount | string): this;
+  transfer(asset: AlkaneId, amount: bigint, to: AlkanesAccount | string | number): this;
+  transfer(asset: "sats", amount: bigint, to: AlkanesAccount | string): this;
+  transfer(asset: "btc", amount: number, to: AlkanesAccount | string): this;
   transfer(
-    assetOrSats: AlkaneId | number,
-    amountOrTo: bigint | AlkanesAccount | string,
-    maybeTo?: AlkanesAccount | string,
+    asset: AlkaneId | "sats" | "btc",
+    amount: bigint | number,
+    to: AlkanesAccount | string | number,
   ): this {
-    if (typeof assetOrSats === "number") {
+    if (asset === "sats" || asset === "btc") {
+      if (typeof to === "number") {
+        throw new Error(
+          "tx: sats go to an address — a shadow vout is not an output and cannot hold them",
+        );
+      }
       this.payments.push({
-        sats: assetOrSats,
-        address: addressOf(amountOrTo as AlkanesAccount | string),
+        sats: asset === "sats" ? Number(amount) : satsOf(amount as number),
+        address: addressOf(to),
       });
       return this;
     }
     this.handoffs.push({
-      id: assetOrSats,
-      amount: amountOrTo as bigint,
-      address: addressOf(maybeTo!),
+      id: asset,
+      amount: amount as bigint,
+      ...(typeof to === "number" ? { shadow: to } : { address: addressOf(to) }),
     });
     return this;
   }
 
   /**
-   * Spend an output of an earlier transaction in the same block. That output
-   * does not exist on chain, so no lookup can find it — naming it here is what
-   * lets a transaction be paid by the one before it.
-   *
-   * Name it either by the transaction itself, or by its position in the block,
-   * which is what lets a whole block be written as one array:
-   *
-   *     .spending(1, KEPT)          // output KEPT of the block's second tx
-   *     .spending(bought, KEPT)     // the same, by name
-   *
-   * If that transaction put the alkanes there with an edict, this already
-   * knows what the outpoint carries and coin selection can account for it. A
-   * call's result is different — nothing knows how much came back until the
-   * block runs — so say what you are spending:
-   *
-   *     .spending(3, KEPT, [{ id: TOKEN_0, amount: backOut }])
+   * All the transfers at once, and nothing after them — the array closes the
+   * transaction. Entries are `[asset, amount, to]`, exactly the arguments
+   * `.transfer()` takes.
    */
-  spending(
-    from: AlkaneTx<any, any> | number,
-    vout: number,
-    holds?: readonly AlkaneAmount[],
-  ): this {
-    this.pending.push({ from, vout, holds });
+  transfers(
+    list: readonly (readonly [AlkaneId, bigint, AlkanesAccount | string | number])[],
+  ): Omit<this, "call" | "protostone" | "transfer" | "transfers" | "spending"> {
+    for (const [asset, amount, to] of list) {
+      this.transfer(asset, amount, to as never);
+    }
+    return this;
+  }
+
+  /**
+   * Spend what an earlier transaction in the same block left you. Those
+   * outputs do not exist on chain, so no lookup can find them — naming the
+   * transaction here is what lets this one be paid by it.
+   *
+   *     .spending(tx1)         // every alkane-bearing output tx1 left me
+   *     .spending(tx1, 0)      // precisely my first output of tx1
+   *
+   * Which outputs are "yours" is decided by script: the built transaction's
+   * outputs are matched against this account's addresses, so the numbers
+   * count YOUR outputs — never the builder's layout. The default (and `"all"`)
+   * takes the alkane-bearing ones: outputs its edicts loaded, plus its home
+   * output, where call results land. A plain number reaches any of your
+   * outputs, plain-BTC change included.
+   *
+   * Nothing states amounts. Whatever actually sits on those outputs rides
+   * into this transaction and the runtime allocates it — which also means an
+   * underfunded spend surfaces as a revert in the simulation, not at build:
+   * the amounts a call returned exist nowhere else.
+   */
+  spending(from: AlkaneTx<any, any>, selector: number | "all" = "all"): this {
+    if ((from as unknown) === this) {
+      throw new Error("tx: .spending() names itself");
+    }
+    this.pending.push({ from, selector });
     return this;
   }
 
@@ -519,29 +629,50 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
   async build(context?: BlockContext): Promise<BuiltTx> {
     if (this.built) return this.built;
 
-    const dangling = this.calls.findIndex(
-      (call, i) => call.carry && i + 1 === this.calls.length,
-    );
-    if (dangling >= 0) {
-      throw new Error(
-        `tx: .carry() after ${this.calls[dangling].method} has nothing to carry to`,
-      );
+    /*
+      Every shadow reference has to name a stone that exists, and stones
+      settle in order, so aiming anything at an earlier (or the same) stone
+      would arrive after it ran — the alkanes would sit on a shadow vout
+      nothing will ever read. Both are said no to here, while the line that
+      wrote them is still on the stack. Indices are absolute: 0 is the
+      transfer stone, so every useful target is at least 1.
+    */
+    const stones = 1 + this.chain.length;
+    const checkTarget = (what: string, n: number, after: number) => {
+      if (!Number.isInteger(n) || n < 0 || n >= stones) {
+        throw new Error(
+          `tx: ${what} aims at shadow vout ${n}, but the last stone is ${stones - 1}`,
+        );
+      }
+      if (n <= after) {
+        throw new Error(
+          `tx: ${what} aims at shadow vout ${n}, which settles before stone ${after} does`,
+        );
+      }
+    };
+    for (const handoff of this.handoffs) {
+      if (handoff.shadow !== undefined) {
+        // the transfer stone is stone 0: it cannot aim at itself
+        checkTarget(".transfer()", handoff.shadow, 0);
+      }
     }
+    this.chain.forEach((stone, i) => {
+      const s = stone.settings;
+      const at = 1 + i; // this stone's own shadow index
+      if (s.shadowPointer !== undefined) checkTarget("shadowPointer", s.shadowPointer, at);
+      if (s.shadowRefund !== undefined) checkTarget("shadowRefund", s.shadowRefund, at);
+      for (const e of s.shadowEdicts ?? []) checkTarget("a shadowEdict", e.to, at);
+    });
 
     for (const pending of this.pending) {
       // an input can only be described once the transaction producing it exists
-      await this.source(pending, context).build(context);
+      await pending.from.build(context);
     }
 
     // even on its own a transaction is built twice — measured, then built —
     // so it shares one lookup with itself when no block supplies the cache
-    const { options, holds } = this.buildOptions(
-      context ?? {
-        spent: new Set(),
-        available: [],
-        spendable: new Map(),
-        txs: [this],
-      },
+    const { options, holds, home } = this.buildOptions(
+      context ?? { spent: new Set(), available: [], spendable: new Map() },
     );
 
     // Two passes: the first only exists to measure the transaction, since the
@@ -576,6 +707,7 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
       hex: transaction.toHex(),
       txid: transaction.getId(),
       holds,
+      home,
       signed,
       psbtBase64: unsigned,
       transaction,
@@ -583,54 +715,56 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
     return this.built;
   }
 
-  /** Simulate this transaction on its own, as a one-transaction block. */
-  send(): Promise<Slot> {
-    return runSimulatedBlock(this.account.provider, [this]).then(
-      ([only]) => only as Slot,
-    );
+  /**
+   * Simulate this transaction on its own. Nothing is broadcast — this asks
+   * what the transaction would do, it does not do it.
+   *
+   * Goes through `alkanes_simulatetransaction` — the authoritative view for a
+   * raw transaction, spoken by metashrew and kirby alike — so a lone
+   * `.simulate()` works against a bare sandshrew with no kirby in front of
+   * it. The one case that cannot: a transaction spending outputs that exist
+   * only alongside other unmined transactions, which by definition needs the
+   * block form.
+   */
+  simulate(): Promise<Slot> {
+    if (this.pending.length > 0) {
+      return runSimulatedBlock(this.account.provider, [this]).then(
+        ([only]) => only as Slot,
+      );
+    }
+    return (async () => {
+      const built = await this.build();
+      const sim = await this.account.provider.simulateTransaction(built.hex);
+      return this.resolve(outcomeOfSimulated(this, built, sim)) as Slot;
+    })();
   }
 
   then<R1 = Slot, R2 = never>(
     onFulfilled?: ((value: Slot) => R1 | PromiseLike<R1>) | null,
     onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
   ): Promise<R1 | R2> {
-    return this.send().then(onFulfilled, onRejected);
+    return this.simulate().then(onFulfilled, onRejected);
   }
 
   /* ── internals ─────────────────────────────────────────────── */
 
-  /** The transaction an input comes from, by object or by block position. */
-  private source(
-    pending: PendingInput,
-    context?: BlockContext,
-  ): AlkaneTx<any, any> {
-    const { from } = pending;
-    if (typeof from !== "number") return from;
-    const at = context?.txs?.[from];
-    if (!at) {
-      throw new Error(
-        `tx: .spending(${from}, …) names position ${from} of the block, but ` +
-          "this transaction is not being simulated as part of one",
+  /**
+   * How each message-carrying stone's result decodes, in settlement order —
+   * the same order the simulated protostones come back in. The transfer stone
+   * carries no message and so appears in neither list; a raw stone that does
+   * carry one gets a `null` decoder, and its result stays raw bytes.
+   */
+  decoders(): ({ contract: CallableContract; outShape: unknown } | null)[] {
+    return this.chain
+      .filter((s) => s.kind === "call" || s.message.length > 0)
+      .map((s) =>
+        s.kind === "call"
+          ? {
+              contract: s.contract,
+              outShape: s.contract.encodeCall(s.method, s.arg).outShape,
+            }
+          : null,
       );
-    }
-    if (at === this) {
-      throw new Error(`tx: .spending(${from}, …) names itself`);
-    }
-    return at;
-  }
-
-  private requireCall(what: string): PlannedCall {
-    const last = this.calls[this.calls.length - 1];
-    if (!last) throw new Error(`tx: .${what}() before any call`);
-    return last;
-  }
-
-  /** The contracts and output shapes each call's result decodes with. */
-  decoders(): { contract: CallableContract; outShape: unknown }[] {
-    return this.calls.map((c) => ({
-      contract: c.contract,
-      outShape: c.contract.encodeCall(c.method, c.arg).outShape,
-    }));
   }
 
   private buildOptions(context: BlockContext) {
@@ -648,12 +782,21 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
     };
 
     for (const handoff of this.handoffs) {
+      /*
+        Every alkane transfer drives coin selection — the builder only reaches
+        for alkane-bearing utxos when a transfer asks for that alkane. One to a
+        person is aimed at their address, which also buys their output; one
+        into a chain stone is aimed at our own asset address, since a shadow
+        vout is not an output — the edict below is what actually delivers it.
+      */
+      const destination =
+        handoff.address ?? this.account.assetAddress;
       transfers.push({
         asset: handoff.id,
         amount: handoff.amount,
-        address: handoff.address,
+        address: destination,
       });
-      noteAddress(handoff.address);
+      noteAddress(destination);
     }
     for (const payment of this.payments) {
       transfers.push({
@@ -663,81 +806,56 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
       });
       noteAddress(payment.address);
     }
-    /*
-      What a call is paid with has to be *selected* as well as routed: the
-      builder only reaches for alkane-bearing utxos when a transfer asks for
-      that alkane. Aiming it at our own asset address keeps it ours — the edicts
-      below are what actually hand it to the call.
-    */
-    for (const call of this.calls) {
-      for (const send of call.sends) {
-        transfers.push({
-          asset: send.id,
-          amount: send.amount,
-          address: this.account.assetAddress,
-        });
-        noteAddress(this.account.assetAddress);
-      }
-    }
 
     /*
-      Protostone 0 is the router. Every alkane riding on the inputs is
-      auto-allocated to the FIRST stone, so that is the only place from which
-      anything can be aimed: each call's payment goes to that call's shadow
-      vout, each handoff to the output its recipient controls, and whatever is
-      left over goes back as change. The message stones follow, one per call, so
-      call `i` always sits at stone `1 + i`.
-    */
-    /*
-      Stone 0 is the router, stones 1..n are the calls in the order they were
-      chained, and a trailing stone settles the transfers. Only the router is
-      reachable from the inputs — the runtime auto-allocates everything riding
-      on them to the first stone — so it is the router that pays each call, and
-      each call then points at whatever comes next in the chain.
+      The stones, in their one fixed shape: the transfer stone, then the chain.
+
+      The transfer stone leads because everything riding on the inputs is
+      auto-allocated to the FIRST protostone — so it is the only stone with
+      anything to route, and its edicts are the routing: each `.transfer()`,
+      whether at a recipient's output or into a chain stone's shadow vout.
+      Chain stone `n` sits at protostone `n + 1`, and every default not
+      overridden by shadow settings points at the sender's alkanes output,
+      so results, refunds and leftovers all come home unless aimed elsewhere.
     */
     const protostones: ProtostoneSpec[] = [];
-    const transferring = this.handoffs.length > 0;
-    if (this.calls.length > 0 || transferring) {
-      // where a call's result goes when it isn't carried: the transfer stone if
-      // there is one, so a transfer can hand on what a call just produced
-      const transferStone = 1 + this.calls.length;
-      const settles = transferring
-        ? toProtostone(transferStone)
-        : POINTER_OUTPUT;
-
+    // shadow index n is protostone n — the transfer stone is 0
+    const shadowOf = (n: number) => toProtostone(n);
+    if (this.chain.length > 0 || this.handoffs.length > 0) {
       protostones.push({
-        edicts: this.calls.flatMap((call, i) =>
-          call.sends.map((send) => ({
-            id: { block: BigInt(send.id.block), tx: BigInt(send.id.tx) },
-            amount: send.amount,
-            output: toProtostone(1 + i),
-          })),
-        ),
-        // leftovers follow the same path a call's result would
-        pointer: transferring ? toProtostone(transferStone) : CHANGE_OUTPUT,
+        edicts: this.handoffs.map((handoff) => ({
+          id: { block: BigInt(handoff.id.block), tx: BigInt(handoff.id.tx) },
+          amount: handoff.amount,
+          output:
+            handoff.shadow !== undefined
+              ? shadowOf(handoff.shadow)
+              : outputIndexOf.get(handoff.address!)!,
+        })),
+        pointer: POINTER_OUTPUT,
+        refundPointer: POINTER_OUTPUT,
       });
 
-      this.calls.forEach((call, i) => {
-        const { calldata } = call.contract.encodeCall(call.method, call.arg);
-        const carried =
-          call.carry && i + 1 < this.calls.length
-            ? toProtostone(2 + i)
-            : undefined;
+      for (const stone of this.chain) {
+        const calldata =
+          stone.kind === "call"
+            ? stone.contract.encodeCall(stone.method, stone.arg).calldata
+            : stone.message;
+        const s = stone.settings;
         protostones.push({
           calldata,
-          pointer: call.pointer ?? carried ?? settles,
-          refundPointer: call.refund ?? CHANGE_OUTPUT,
-        });
-      });
-
-      if (transferring) {
-        protostones.push({
-          edicts: this.handoffs.map((handoff) => ({
-            id: { block: BigInt(handoff.id.block), tx: BigInt(handoff.id.tx) },
-            amount: handoff.amount,
-            output: outputIndexOf.get(handoff.address)!,
+          edicts: (s.shadowEdicts ?? []).map((e) => ({
+            id: { block: BigInt(e.id.block), tx: BigInt(e.id.tx) },
+            amount: e.amount,
+            output: shadowOf(e.to),
           })),
-          pointer: CHANGE_OUTPUT,
+          pointer:
+            s.shadowPointer !== undefined
+              ? shadowOf(s.shadowPointer)
+              : POINTER_OUTPUT,
+          refundPointer:
+            s.shadowRefund !== undefined
+              ? shadowOf(s.shadowRefund)
+              : POINTER_OUTPUT,
         });
       }
     }
@@ -746,32 +864,72 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
       What this transaction's own edicts leave on each output. A later
       transaction spending one of them can then account for the alkanes without
       anyone looking them up, because nothing on chain knows about them yet.
+      Only transfers to people land on outputs — one into a chain stone is
+      consumed by the call it pays.
     */
     const holds = new Map<number, AlkaneAmount[]>();
     for (const handoff of this.handoffs) {
+      if (handoff.address === undefined) continue;
       const vout = outputIndexOf.get(handoff.address)!;
       const at = holds.get(vout) ?? [];
       at.push({ id: handoff.id, amount: handoff.amount });
       holds.set(vout, at);
     }
 
-    const sources = this.pending.map((pending) => ({
-      built: this.source(pending, context).built!,
-      vout: pending.vout,
-      stated: pending.holds,
-    }));
-    const includeInputs = sources.map(({ built, vout, stated }) =>
-      chainedInput(
-        built,
+    /*
+      Resolve each `.spending()` to concrete outputs, by ownership rather than
+      by layout: the source's built outputs are script-matched against this
+      account's addresses, and the selector counts within the matches. The
+      default sweeps the alkane-bearing ones — edicted outputs plus the home
+      output, where a call's results land.
+    */
+    const network = this.account.provider.network;
+    const scriptOf = (address: string) =>
+      bitcoin.address.toOutputScript(address, network).toString("hex");
+    /*
+      Two notions of "yours", on purpose. Alkanes live at the asset address,
+      so the sweep matches only it — a payment address can be shared for fee
+      funding, and sweeping by it would take a housemate's change along. The
+      numeric selector matches either address, because it exists precisely to
+      reach anything that is yours, shared change included.
+    */
+    const assetScript = scriptOf(this.account.assetAddress);
+    const anyMine = new Set([scriptOf(this.account.address), assetScript]);
+    const resolved = this.pending.flatMap((pending) => {
+      const built = pending.from.built!;
+      const outs = built.transaction.outs.map((out, vout) => ({
         vout,
-        this.account.provider.network,
-        stated ?? built.holds.get(vout) ?? [],
-      ),
+        script: out.script.toString("hex"),
+      }));
+      if (pending.selector !== "all") {
+        const mine = outs.filter(({ script }) => anyMine.has(script));
+        const at = mine[pending.selector];
+        if (at === undefined) {
+          throw new Error(
+            `tx: .spending(…, ${pending.selector}) — ${built.txid} has ` +
+              `${mine.length} output(s) of yours, none at index ${pending.selector}`,
+          );
+        }
+        return [{ built, vout: at.vout }];
+      }
+      const bearing = outs
+        .filter(({ script }) => script === assetScript)
+        .map(({ vout }) => vout)
+        .filter((v) => built.holds.has(v) || v === built.home);
+      if (bearing.length === 0) {
+        throw new Error(
+          `tx: .spending(…) — ${built.txid} left ${this.account.assetAddress} ` +
+            "no alkane-bearing output to spend",
+        );
+      }
+      return bearing.map((vout) => ({ built, vout }));
+    });
+    const includeInputs = resolved.map(({ built, vout }) =>
+      chainedInput(built, vout, network, built.holds.get(vout) ?? []),
     );
-    // Only a chained input nobody can account for needs the checks relaxed.
-    const blind = sources.some(
-      ({ built, vout, stated }) => !stated && !built.holds.has(vout),
-    );
+    // An output whose contents only the simulation knows — a call's result —
+    // can't be accounted for at build, so the alkane checks stand down.
+    const blind = resolved.some(({ built, vout }) => !built.holds.has(vout));
 
     const options = {
       provider: this.account.provider,
@@ -805,7 +963,9 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
       ...(protostones.length > 0 ? { protostones } : {}),
     } as ConstructorParameters<typeof ProtostoneTransaction>[1];
 
-    return { options, holds };
+    // the alkanes dust output is the first output whenever stones exist
+    const home = protostones.length > 0 ? 0 : null;
+    return { options, holds, home };
   }
 }
 
@@ -887,8 +1047,6 @@ export interface BlockContext {
   available: FormattedUtxo[];
   /** One lookup per address for the whole block, not one per build pass. */
   spendable: Map<string, Promise<FormattedUtxo[]>>;
-  /** The block itself, so `.spending(index, …)` can find what it names. */
-  txs: readonly AlkaneTx<any, any>[];
 }
 
 /**
@@ -914,19 +1072,15 @@ function changeOutputs(
 /**
  * Transactions simulated in order against one shared state, the way they would
  * land in a block: each sees the storage the ones before it wrote and the
- * alkanes they moved. Goes out as raw transaction hex — kirby decodes the
- * runestones itself, so what's simulated is the transaction, not a description
- * of one.
- *
- * Requires kirby (`kirby_simulateblock`); a bare metashrew has no notion of a
- * chunk.
+ * alkanes they moved. Goes out as a consensus-encoded block, so what is
+ * simulated is the transactions themselves rather than a description of them.
  */
 /**
  * Simulate a chunk of transactions in order against one shared state, the way
  * they would land in a block: each sees the storage the ones before it wrote
- * and the alkanes they moved. Goes out as raw transaction hex — kirby decodes
- * the runestones itself, so what is simulated is the transaction, not a
- * description of one.
+ * and the alkanes they moved. Goes out as a consensus-encoded block via
+ * `alkanes_simulateblock`, so what is simulated is the transactions
+ * themselves rather than a description of them.
  *
  *     const [a, handed, b] = await provider.simulateBlock([tx1, tx2, tx3]);
  *
@@ -934,9 +1088,8 @@ function changeOutputs(
  * `.unwrap()` (or `.unwrapOr`, `.toNullable`) resolves to its answer directly,
  * so a block can be destructured straight into values.
  *
- * Requires kirby (`kirby_simulateblock`); a bare metashrew has no notion of a
- * chunk. Nothing is unwrapped and nothing throws on a revert: each transaction
- * comes back with its own results.
+ * Nothing is unwrapped and nothing throws on a revert: each transaction comes
+ * back with its own results.
  */
 export async function runSimulatedBlock<
   T extends readonly AlkaneTx<any, any>[],
@@ -964,7 +1117,6 @@ export async function runSimulatedBlock<
     spent: new Set(),
     available: [],
     spendable: new Map(),
-    txs,
   };
   for (const tx of txs) {
     const one = await tx.build(context);
@@ -976,28 +1128,99 @@ export async function runSimulatedBlock<
     built.push(one);
   }
 
-  const res = await fetch(provider.sandshrewUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "kirby_simulateblock",
-      params: [{ height: "0", txs: built.map((b) => b.hex) }],
-    }),
-  });
-  const json: any = await res.json();
-  if (json?.error) {
-    throw new Error(json.error.message ?? "simulateblock failed");
-  }
-  const list = json?.result?.results;
-  if (!Array.isArray(list) || list.length !== built.length) {
-    throw new Error("simulateblock: unexpected response shape");
+  const block = await provider.simulateRawBlock(blockOf(built.map((b) => b.hex)));
+  // txs[0] is the coinbase the wrapper put there, so ours start at 1
+  const results = block.txs.slice(1);
+  if (results.length !== built.length) {
+    throw new Error(
+      `simulateblock: asked about ${built.length} transaction(s), heard about ${results.length}`,
+    );
   }
 
   return txs.map((tx, i) =>
-    tx.resolve(readOutcome(tx, built[i], list[i])),
+    tx.resolve(outcomeOfSimulated(tx, built[i], results[i])),
   ) as BlockResults<T>;
+}
+
+/**
+ * A `simulatetransaction` answer as a `TxOutcome`, so `.simulate()` reports the
+ * same shape whichever wire it went over. Everything a call returned lives in
+ * its protostone's trace: the outermost exit — the last event of a balanced
+ * trace — carries the returndata, and a revert carries its reason behind the
+ * `08c379a0` selector.
+ */
+function outcomeOfSimulated(
+  tx: AlkaneTx<any, any>,
+  built: BuiltTx,
+  sim: SimulatedTransaction,
+): TxOutcome {
+  const decoders = tx.decoders();
+  const calls = decoders.map((decoder, k) => {
+    const stone = sim.protostones[k];
+    const last = stone?.events[stone.events.length - 1] as any;
+    if (!last || last.event !== "return") {
+      return new BoxedError(
+        sim.error ?? "no result for this call in the simulated transaction",
+        AlkanesSimulationError.UnknownError,
+      ) as BoxedResponse<unknown, AlkanesSimulationError>;
+    }
+    const data: string = last.data.response.data;
+    if (last.data.status !== "success") {
+      return new BoxedError(
+        `ALKANES: revert: ${extractAbiErrorMessage(data) ?? data}`,
+        AlkanesSimulationError.TransactionReverted,
+      ) as BoxedResponse<unknown, AlkanesSimulationError>;
+    }
+    // a raw stone has no declared shape, so its answer stays raw bytes
+    if (decoder === null) {
+      return new BoxedSuccess(bytesFromHex(data)) as BoxedResponse<
+        unknown,
+        AlkanesSimulationError
+      >;
+    }
+    try {
+      return new BoxedSuccess(
+        decoder.contract.decodeReturn(bytesFromHex(data), decoder.outShape),
+      ) as BoxedResponse<unknown, AlkanesSimulationError>;
+    } catch (error) {
+      return new BoxedError(
+        `decode failed: ${(error as Error).message}`,
+        AlkanesSimulationError.UnknownError,
+      ) as BoxedResponse<unknown, AlkanesSimulationError>;
+    }
+  });
+
+  const traces = sim.protostones.map((stone) => ({
+    outpoint: `${sim.txid}:${stone.vout}`,
+    events: stone.events,
+  }));
+
+  const result =
+    calls[calls.length - 1] ??
+    (sim.error
+      ? (new BoxedError(
+          sim.error,
+          AlkanesSimulationError.UnknownError,
+        ) as BoxedResponse<unknown, AlkanesSimulationError>)
+      : (new BoxedSuccess(new Uint8Array()) as BoxedResponse<
+          unknown,
+          AlkanesSimulationError
+        >));
+
+  return {
+    txid: sim.txid,
+    hex: built.hex,
+    signed: built.signed,
+    calls,
+    outputs: sim.outputs,
+    traces,
+    trace: traces.map(({ outpoint, events }) => ({
+      outpoint,
+      events: decodeTrace(events),
+    })),
+    result,
+    ok: calls.every((c) => !isBoxedError(c)) && !sim.error,
+  };
 }
 
 /** espo and kirby report value bytes as "0x…" hex. */
@@ -1010,79 +1233,3 @@ function bytesFromHex(value: string | undefined): Uint8Array {
   return out;
 }
 
-/**
- * Read one transaction's slot out of a simulated block. kirby answers per
- * protostone, and only the stones carrying a message have anything to say —
- * the edict-only ones report null — so the answers line up with the calls.
- */
-function readOutcome(
-  tx: AlkaneTx<any, any>,
-  built: BuiltTx,
-  entry: any,
-): TxOutcome {
-  const traces: { outpoint: string; events: AlkanesTraceEncodedResult }[] =
-    Array.isArray(entry?.traces) ? entry.traces : [];
-  const decoders = tx.decoders();
-  const spoken: any[] = Array.isArray(entry?.executions)
-    ? entry.executions.filter((s: unknown) => s !== null)
-    : entry?.execution
-      ? [entry]
-      : [];
-
-  const calls = decoders.map((decoder, i) => {
-    const stone = spoken[i];
-    if (!stone?.execution) {
-      return new BoxedError(
-        "no result for this call in the simulated block",
-        AlkanesSimulationError.UnknownError,
-      ) as BoxedResponse<unknown, AlkanesSimulationError>;
-    }
-    if (stone.execution.error) {
-      return new BoxedError(
-        String(stone.execution.error),
-        AlkanesSimulationError.TransactionReverted,
-      ) as BoxedResponse<unknown, AlkanesSimulationError>;
-    }
-    try {
-      return new BoxedSuccess(
-        decoder.contract.decodeReturn(
-          bytesFromHex(stone.execution.data),
-          decoder.outShape,
-        ),
-      ) as BoxedResponse<unknown, AlkanesSimulationError>;
-    } catch (error) {
-      return new BoxedError(
-        `decode failed: ${(error as Error).message}`,
-        AlkanesSimulationError.UnknownError,
-      ) as BoxedResponse<unknown, AlkanesSimulationError>;
-    }
-  });
-
-  // a transfer-only transaction makes no call; its answer is where things landed
-  const result =
-    calls[calls.length - 1] ??
-    (entry?.execution?.error
-      ? (new BoxedError(
-          String(entry.execution.error),
-          AlkanesSimulationError.TransactionReverted,
-        ) as BoxedResponse<unknown, AlkanesSimulationError>)
-      : (new BoxedSuccess(new Uint8Array()) as BoxedResponse<
-          unknown,
-          AlkanesSimulationError
-        >));
-
-  return {
-    txid: entry?.txid ?? built.txid,
-    hex: built.hex,
-    signed: built.signed,
-    calls,
-    outputs: Array.isArray(entry?.outputs) ? entry.outputs : [],
-    traces,
-    trace: traces.map(({ outpoint, events }) => ({
-      outpoint,
-      events: decodeTrace(events),
-    })),
-    result,
-    ok: calls.every((c) => !isBoxedError(c)) && !entry?.execution?.error,
-  };
-}
