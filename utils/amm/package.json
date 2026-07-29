@@ -1,0 +1,9 @@
+{
+  "name": "alkanesjs-utils-amm",
+  "private": true,
+  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/utils/amm",
+  "main": "../../dist/utils-amm.js",
+  "module": "../../dist/utils-amm.mjs",
+  "browser": "../../dist/utils-amm.mjs",
+  "types": "../../dist/utils-amm.d.ts"
+}

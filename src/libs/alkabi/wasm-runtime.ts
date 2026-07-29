@@ -26,7 +26,8 @@
 
 import { debugEvent } from "@/debug";
 
-export interface AlkaneIdLike {
+/** An id as the wasm host accepts one — anything numeric-ish in both slots. */
+export interface WasmAlkaneId {
   block: bigint | number | string;
   tx: bigint | number | string;
 }
@@ -40,7 +41,7 @@ export interface WasmViewOptions {
   /** Contract bytes, or an already-compiled module (cache this across calls). */
   wasm: Uint8Array | WebAssembly.Module;
   /** The alkane being called — becomes `myself` in the context. */
-  alkaneId: AlkaneIdLike;
+  alkaneId: WasmAlkaneId;
   opcode: bigint;
   /** Calldata input words, opcode NOT included. */
   words: bigint[];
@@ -123,7 +124,7 @@ function u64le(v: bigint): Uint8Array {
  * triples follow the header.
  */
 export function serializeContext(
-  alkaneId: AlkaneIdLike,
+  alkaneId: WasmAlkaneId,
   opcode: bigint,
   words: bigint[],
   vout: bigint = 0n,

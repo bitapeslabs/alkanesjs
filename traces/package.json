@@ -1,0 +1,9 @@
+{
+  "name": "alkanesjs-traces",
+  "private": true,
+  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/traces",
+  "main": "../dist/traces.js",
+  "module": "../dist/traces.mjs",
+  "browser": "../dist/traces.mjs",
+  "types": "../dist/traces.d.ts"
+}

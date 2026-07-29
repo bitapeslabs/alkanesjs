@@ -8,10 +8,19 @@ import { WaitPacer } from "./pacer";
 
 import { AlkanesExecuteError, execute, simulate } from "@/libs/alkanes";
 import {
+  buildChain,
   runSimulatedBlock,
   type AlkaneTx,
   type BlockResults,
 } from "@/libs/alkanes/account";
+
+/**
+ * A package in flight. Await it for the txids, in the order given, or chain
+ * `waitForConfirmation()` to wait the whole package out.
+ */
+export type SentPackage = Promise<string[]> & {
+  waitForConfirmation: () => Promise<void>;
+};
 import {
   decodeSimulateBlockResponse,
   decodeSimulateTransactionResponse,
@@ -176,6 +185,62 @@ export class Provider {
     txs: readonly [...T],
   ): Promise<BlockResults<T>> {
     return runSimulatedBlock(this, txs);
+  }
+
+  /**
+   * Broadcast a dependent run of transactions as ONE package — the same build
+   * `simulateBlock` does, then espo's `btc.submit_package`.
+   *
+   *     const { txids } = await provider.sendPackage([wrap, swap]);
+   *     await sent.waitForConfirmation();
+   *
+   * A package is judged on its COMBINED fee rate, so a parent paying under the
+   * mempool minimum still relays when the child covers the deficit — and the
+   * child may spend outputs the parent has not had confirmed, which is what
+   * makes a `.spending()` chain broadcastable at all. Order matters: parents
+   * before the children that spend them, which is the order given.
+   *
+   * Waiting resolves once the LAST transaction is mined and espo has indexed
+   * its block — a package is mined together, so that is the whole run.
+   */
+  sendPackage(
+    txs: readonly AlkaneTx<any, any>[],
+  ): SentPackage {
+    const inFlight = (async () => {
+      const built = await buildChain(this, txs);
+      const unsigned = built.find((b) => !b.signed);
+      if (unsigned) {
+        throw new Error(
+          "sendPackage: a transaction carries placeholder witnesses — a " +
+            "ViewAccount builds bytes a simulation accepts, not bytes a node will",
+        );
+      }
+      consumeOrThrow(await this.rpc.espo.submitPackage(built.map((b) => b.hex)));
+      return built.map((b) => b.txid);
+    })();
+
+    return Object.assign(inFlight, {
+      waitForConfirmation: async (): Promise<void> => {
+        const txids = await inFlight;
+        const last = txids[txids.length - 1];
+        // mined…
+        let height = 0;
+        for (;;) {
+          const tx = await this.rpc.electrum.esplora_gettransaction(last);
+          if (!isBoxedError(tx) && tx.data.status?.confirmed) {
+            height = tx.data.status.block_height ?? 0;
+            break;
+          }
+          await sleep(2000);
+        }
+        // …and indexed, so a read after this sees what the package did
+        for (;;) {
+          const tip = await this.rpc.espo.getTipHeight();
+          if (!isBoxedError(tip) && tip.data.height >= height) return;
+          await sleep(1000);
+        }
+      },
+    });
   }
 
   /**

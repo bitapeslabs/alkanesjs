@@ -1,5 +1,5 @@
-import { AlkaneId } from "./apis";
-import { ISchemaAlkaneId } from "./libs/schemas";
+import { AlkaneId } from "@/apis";
+import { ISchemaAlkaneId } from "@/libs/schemas";
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export function hexToUint8Array(hex: string): Uint8Array {

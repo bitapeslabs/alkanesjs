@@ -1,0 +1,9 @@
+{
+  "name": "alkanesjs-utils-frbtc",
+  "private": true,
+  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/utils/frbtc",
+  "main": "../../dist/utils-frbtc.js",
+  "module": "../../dist/utils-frbtc.mjs",
+  "browser": "../../dist/utils-frbtc.mjs",
+  "types": "../../dist/utils-frbtc.d.ts"
+}

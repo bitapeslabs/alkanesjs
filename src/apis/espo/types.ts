@@ -70,7 +70,8 @@ export interface EspoHolderRaw {
 
 export interface EspoHolder {
   address: string;
-  amount: number;
+  /** Raw units, as espo sends them — see `Amount` for rendering one. */
+  amount: bigint;
 }
 
 export interface EspoGetHoldersParams {
@@ -108,7 +109,8 @@ export interface EspoBalanceEntryRaw {
 
 export interface EspoBalanceEntry {
   alkane: EspoAlkaneId;
-  amount: number;
+  /** Raw units, as espo sends them — see `Amount` for rendering one. */
+  amount: bigint;
 }
 
 export interface EspoOutpointBalanceRaw {
@@ -137,7 +139,7 @@ export interface EspoGetAddressBalancesParams {
 
 export interface EspoGetAddressBalancesOk extends EspoOkResult {
   address: string;
-  balances: Record<EspoAlkaneId, number>;
+  balances: Record<EspoAlkaneId, bigint>;
   outpoints?: EspoOutpointBalance[];
 }
 export type EspoGetAddressBalances = DeepExpand<

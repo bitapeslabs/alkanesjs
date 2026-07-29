@@ -28,6 +28,26 @@ const wantNode = args.includes("--node") || !args.includes("--browser");
 const wantBrowser = args.includes("--browser") || !args.includes("--node");
 
 /*──────────────────────────────────────────────────────────────*
+ | Public entries — one row per subpath in package.json#exports. |
+ | Each becomes dist/<out>.js (node CJS), dist/<out>.mjs         |
+ | (polyfilled browser ESM) and dist/<out>.d.ts (flattened by    |
+ | rollup.config.mjs, which lists the same rows).                |
+ *──────────────────────────────────────────────────────────────*/
+const ENTRIES = [
+  { src: "src/boxed.ts", out: "boxed" },
+  { src: "src/traces.ts", out: "traces" },
+  { src: "src/abi.ts", out: "abi" },
+  { src: "src/debug.ts", out: "debug" },
+  { src: "src/utils/amm.ts", out: "utils-amm" },
+  { src: "src/utils/frbtc.ts", out: "utils-frbtc" },
+];
+const KEEP_DTS = new Set([
+  "index.d.ts",
+  "wallets.d.ts",
+  ...ENTRIES.map((e) => `${e.out}.d.ts`),
+]);
+
+/*──────────────────────────────────────────────────────────────*
  | 1.  Clean dist                                                |
  *──────────────────────────────────────────────────────────────*/
 const distDir = path.resolve("dist");
@@ -56,9 +76,8 @@ fs.readdirSync(distDir, { withFileTypes: true }).forEach((entry) => {
   if (entry.isDirectory()) {
     fs.rmSync(fullPath, { recursive: true, force: true });
   } else if (
-    entry.name !== "index.d.ts" &&
-    entry.name !== "wallets.d.ts" &&
-    entry.name.endsWith(".d.ts")
+    entry.name.endsWith(".d.ts") &&
+    !KEEP_DTS.has(entry.name)
   ) {
     fs.rmSync(fullPath);
   }
@@ -181,16 +200,64 @@ async function buildWallets(format, outfile) {
 }
 
 /*──────────────────────────────────────────────────────────────*
+ | Structured entries. Built like the main entry (node CJS +     |
+ | polyfilled browser ESM): several pull in node-flavoured deps  |
+ | (frbtc wants bitcoinjs + ecc, traces the protobuf decoders).  |
+ *──────────────────────────────────────────────────────────────*/
+async function buildEntry(src, format, outfile) {
+  const entry = { entryPoints: [src] };
+  const out = { outfile: path.join(distDir, outfile) };
+  if (format === "cjs") {
+    return build({
+      ...entry,
+      ...out,
+      bundle: true,
+      platform: "node",
+      target: "node18",
+      format: "cjs",
+      sourcemap: true,
+      plugins: [removeNegZeroPlugin],
+    });
+  }
+  return build({
+    ...entry,
+    ...out,
+    bundle: true,
+    platform: "browser",
+    target: ["es2020"],
+    format: "esm",
+    sourcemap: true,
+    mainFields: ["browser", "module", "main"],
+    conditions: ["browser", "import", "default"],
+    define: {
+      "process.env.NODE_ENV": JSON.stringify(
+        process.env.NODE_ENV || "production",
+      ),
+      global: "globalThis",
+    },
+    inject: [stdlibShim],
+    plugins: [
+      NodeGlobalsPolyfillPlugin({ process: true, buffer: true }),
+      NodeModulesPolyfillPlugin(),
+      removeNegZeroPlugin,
+    ],
+    treeShaking: true,
+  });
+}
+
+/*──────────────────────────────────────────────────────────────*
  | Run builds                                                    |
  *──────────────────────────────────────────────────────────────*/
 if (wantNode) {
   console.log("→ Building Node (CJS) bundle…");
   await buildNodeCJS();
   await buildWallets("cjs", "wallets.js");
+  for (const e of ENTRIES) await buildEntry(e.src, "cjs", `${e.out}.js`);
 }
 if (wantBrowser) {
   console.log("→ Building Browser (ESM) bundle…");
   await buildBrowserESM();
   await buildWallets("esm", "wallets.mjs");
+  for (const e of ENTRIES) await buildEntry(e.src, "esm", `${e.out}.mjs`);
 }
 console.log("✓ Done.");

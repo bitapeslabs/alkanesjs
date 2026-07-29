@@ -9,7 +9,12 @@
   },
   "files": [
     "dist",
-    "wallets"
+    "wallets",
+    "utils",
+    "boxed",
+    "traces",
+    "abi",
+    "debug"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.browser.mjs",
@@ -31,7 +36,55 @@
       "default": "./dist/wallets.mjs"
     },
     "./wallets/package.json": "./wallets/package.json",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./utils/amm": {
+      "types": "./dist/utils-amm.d.ts",
+      "browser": "./dist/utils-amm.mjs",
+      "import": "./dist/utils-amm.mjs",
+      "require": "./dist/utils-amm.js",
+      "default": "./dist/utils-amm.mjs"
+    },
+    "./utils/amm/package.json": "./utils/amm/package.json",
+    "./utils/frbtc": {
+      "types": "./dist/utils-frbtc.d.ts",
+      "browser": "./dist/utils-frbtc.mjs",
+      "import": "./dist/utils-frbtc.mjs",
+      "require": "./dist/utils-frbtc.js",
+      "default": "./dist/utils-frbtc.mjs"
+    },
+    "./utils/frbtc/package.json": "./utils/frbtc/package.json",
+    "./boxed": {
+      "types": "./dist/boxed.d.ts",
+      "browser": "./dist/boxed.mjs",
+      "import": "./dist/boxed.mjs",
+      "require": "./dist/boxed.js",
+      "default": "./dist/boxed.mjs"
+    },
+    "./boxed/package.json": "./boxed/package.json",
+    "./traces": {
+      "types": "./dist/traces.d.ts",
+      "browser": "./dist/traces.mjs",
+      "import": "./dist/traces.mjs",
+      "require": "./dist/traces.js",
+      "default": "./dist/traces.mjs"
+    },
+    "./traces/package.json": "./traces/package.json",
+    "./abi": {
+      "types": "./dist/abi.d.ts",
+      "browser": "./dist/abi.mjs",
+      "import": "./dist/abi.mjs",
+      "require": "./dist/abi.js",
+      "default": "./dist/abi.mjs"
+    },
+    "./abi/package.json": "./abi/package.json",
+    "./debug": {
+      "types": "./dist/debug.d.ts",
+      "browser": "./dist/debug.mjs",
+      "import": "./dist/debug.mjs",
+      "require": "./dist/debug.js",
+      "default": "./dist/debug.mjs"
+    },
+    "./debug/package.json": "./debug/package.json"
   },
   "scripts": {
     "dev": "node esbuild.config.mjs && node dist/index.js",

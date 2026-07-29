@@ -1,0 +1,9 @@
+{
+  "name": "alkanesjs-boxed",
+  "private": true,
+  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/boxed",
+  "main": "../dist/boxed.js",
+  "module": "../dist/boxed.mjs",
+  "browser": "../dist/boxed.mjs",
+  "types": "../dist/boxed.d.ts"
+}

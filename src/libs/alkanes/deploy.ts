@@ -27,8 +27,12 @@
       .call(blueprint, "initialize", initArgs)
       .build();
 
-    const { waitForDeployment } = await deployment.submit();
-    const alkaneId = await waitForDeployment();   // { block, tx }
+    const alkaneId = await account
+      .deploy(wasm)
+      .call(MyContractAbi, "initialize", initArgs)
+      .build()
+      .send()
+      .waitForDeployment();
 
   A `DeploymentPackage` also destructures into its two transactions
   when that is all you want:
@@ -51,6 +55,7 @@ import type { AlkaneId, FormattedUtxo } from "@/apis";
 import { consumeOrThrow, isBoxedError } from "@/boxed";
 import { sleep } from "@/utils";
 import type { AlkabiDocument } from "../alkabi/types";
+import { Contract } from "../alkabi/contract";
 import type { InferAlkabiIo } from "../alkabi/infer";
 import type {
   Account,
@@ -102,7 +107,7 @@ export interface DeploymentTx {
 }
 
 /**
- * What `submit()` answers: the txids as accepted, and a `waitForDeployment`
+ * What `send()` answers: the txids as accepted, and a `waitForDeployment`
  * that resolves to the contract's alkane id once the reveal is mined, espo
  * has indexed its block, and the trace's `create` event names the id.
  */
@@ -113,9 +118,42 @@ export interface SubmittedDeployment {
 }
 
 /**
- * The built pair, ready to go on chain. `submit()` hands both transactions to
+ * A package in flight. Await it for the txids, or keep chaining for the
+ * alkane id — one submission either way.
+ */
+export type SentDeployment = Promise<{
+  commitTxid: string;
+  revealTxid: string;
+}> & {
+  waitForDeployment: () => Promise<AlkaneId>;
+};
+
+/**
+ * A deployment being built. The chain ends wherever you stop awaiting it: the
+ * built package, its txids once sent, or the alkane id once it is on chain.
+ */
+export type BuildingDeployment = Promise<DeploymentPackage> & {
+  send: () => SentDeployment;
+};
+
+function sentDeployment(
+  inFlight: Promise<SubmittedDeployment>,
+): SentDeployment {
+  const txids = inFlight.then(({ commitTxid, revealTxid }) => ({
+    commitTxid,
+    revealTxid,
+  }));
+  return Object.assign(txids, {
+    waitForDeployment: () => inFlight.then((s) => s.waitForDeployment()),
+  });
+}
+
+/**
+ * The built pair, ready to go on chain. `send()` hands both transactions to
  * espo's `btc.submit_package` — atomically, as a package, which is what lets
  * the floor-rate commit relay. Destructures into `[commitTx, revealTx]`.
+ *
+ *     const id = await deployment.send().waitForDeployment();
  */
 export class DeploymentPackage {
   constructor(
@@ -137,7 +175,16 @@ export class DeploymentPackage {
     yield this.revealTx;
   }
 
-  async submit(): Promise<SubmittedDeployment> {
+  send(): SentDeployment {
+    /*
+      One submission, two ways to hold it: the promise is made once, so
+      awaiting for the txids and chaining `waitForDeployment()` off it put the
+      same package on chain rather than racing two of them.
+    */
+    return sentDeployment(this.submitPackage());
+  }
+
+  private async submitPackage(): Promise<SubmittedDeployment> {
     const provider = this.account.provider;
 
     const submitted = await provider.rpc.espo.submitPackage([
@@ -243,18 +290,18 @@ export class AlkaneDeployment {
   ) {}
 
   /**
-   * The constructor call, written like any `.tx()` call — typed off the
-   * blueprint's ABI. The blueprint is a `Contract` descriptor of the code
-   * being deployed; its alkane id is a placeholder (`{ block: 0n, tx: 0n }`
-   * reads honestly), since the id does not exist until the deployment
-   * assigns one — the cellpack targets the envelope instead.
+   * The constructor call, written like any `.tx()` call — except the first
+   * argument is the ABI itself, not a contract instance. The contract being
+   * deployed has no alkane id yet, so there is nothing honest to instantiate;
+   * the ABI is what actually types the method name and its argument, and the
+   * cellpack targets the deployment envelope rather than any id.
    *
-   *     account.deploy(wasm).call(blueprint, "initialize", initArgs)
+   *     account.deploy(wasm).call(MyContractAbi, "initialize", initArgs)
    *
    * A deployment runs exactly one constructor call.
    */
-  call<D, N extends MethodNameOf<D>>(
-    contract: CallableContract<D>,
+  call<const D extends AlkabiDocument, N extends MethodNameOf<D>>(
+    abi: D,
     method: N,
     ...rest: ConstructorArg<D, N>
   ): this {
@@ -269,7 +316,9 @@ export class AlkaneDeployment {
       );
     }
     this.constructorCall = {
-      contract: contract as CallableContract,
+      // an id-less descriptor: only encodeCall is ever used, and the leading
+      // [block, tx] words it emits are sliced off in favor of the envelope
+      contract: new Contract(abi, { block: 0n, tx: 0n }) as CallableContract,
       method,
       arg: rest[0],
     };
@@ -286,7 +335,23 @@ export class AlkaneDeployment {
    * relay floor, the reveal pays the deficit, and commitFee + revealFee over
    * commitVsize + revealVsize comes out to the number given.
    */
-  async build(buildOptions: TxBuildOptions = {}): Promise<DeploymentPackage> {
+  build(buildOptions: TxBuildOptions = {}): BuildingDeployment {
+    const inFlight = this.buildPackage(buildOptions);
+    return Object.assign(inFlight, {
+      send: (): SentDeployment => {
+        // boxed so the SentDeployment survives `.then` without being flattened
+        const boxed = inFlight.then((pkg) => ({ sent: pkg.send() }));
+        const txids = boxed.then((b) => b.sent);
+        return Object.assign(txids, {
+          waitForDeployment: () => boxed.then((b) => b.sent.waitForDeployment()),
+        });
+      },
+    });
+  }
+
+  private async buildPackage(
+    buildOptions: TxBuildOptions = {},
+  ): Promise<DeploymentPackage> {
     const account = this.account;
     const provider = account.provider;
     const network = provider.network;

@@ -89,7 +89,8 @@ export const TokenABI = abi.contract({
         ).balances;
         const target = `${this.alkaneId.block.toString()}:${this.alkaneId.tx.toString()}`;
 
-        return new BoxedSuccess(balances[target] ?? 0);
+        // raw units, like every other amount the SDK hands back
+        return new BoxedSuccess(balances[target] ?? 0n);
       } catch (err) {
         return new BoxedError(`Failed to fetch balance: ${(err as Error).message}`, AlkanesFetchError.UnknownError);
       }

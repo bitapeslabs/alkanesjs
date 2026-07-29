@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { quoteExactIn, quoteExactOut, applySlippage } from "./quote";
+import { quoteExactIn, quoteExactOut, applySlippage } from "./amm";
 
 /*
   Hand-computed reference values.

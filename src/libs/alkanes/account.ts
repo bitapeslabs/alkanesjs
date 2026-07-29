@@ -34,9 +34,15 @@
 
 import * as bitcoin from "bitcoinjs-lib";
 import { toXOnly } from "bitcoinjs-lib/src/psbt/bip371";
-import { AlkaneId, FormattedUtxo } from "@/apis";
+import { AlkaneId, type AlkaneIdLike, FormattedUtxo } from "@/apis";
 import type { Provider } from "@/provider";
-import { BoxedError, BoxedResponse, BoxedSuccess, isBoxedError } from "@/boxed";
+import {
+  BoxedError,
+  BoxedResponse,
+  BoxedSuccess,
+  consumeOrThrow,
+  isBoxedError,
+} from "@/boxed";
 import { AlkanesSimulationError } from "../interfaces/base";
 import type {
   AlkanesTraceEncodedResult,
@@ -188,6 +194,39 @@ export abstract class AlkanesAccount {
   tx(): AlkaneTx {
     return new AlkaneTx(this);
   }
+
+  /**
+   * What this account holds, by alkane — espo's own aggregate, in raw units:
+   *
+   *     const held = await alice.getBalances();
+   *     held.amountOf("2:0")                   // 100000000n
+   *     Amount.toString(held.amountOf(TOKEN))  // "1"
+   *
+   * Reads the asset address, since that is where an account's alkanes live.
+   */
+  async getBalances(): Promise<Balances> {
+    const { balances } = consumeOrThrow(
+      await this.provider.rpc.espo.getAddressBalances(this.assetAddress()),
+    );
+    return new Balances(Object.entries(balances));
+  }
+}
+
+/**
+ * Amounts by alkane, keyed the way espo keys them — `"block:tx"` — so a
+ * lookup is a string compare rather than object identity. `amountOf` takes an
+ * id in any spelling and answers `0n` for one that isn't held, which is what
+ * "how much do I have" should say about nothing.
+ */
+export class Balances extends Map<string, bigint> {
+  amountOf(id: AlkaneIdLike): bigint {
+    return this.get(AlkaneId.toString(id)) ?? 0n;
+  }
+
+  /** The alkanes held, as ids. */
+  alkanes(): AlkaneId[] {
+    return [...this.keys()].map((key) => AlkaneId.fromString(key));
+  }
 }
 
 /**
@@ -311,11 +350,11 @@ export class Account extends AlkanesAccount {
    * Deploy a contract: `wasm` is the compiled bytes, and the pair of
    * transactions that carries them on chain comes back built and signed.
    *
-   *     const deployment = await account.deploy(wasm, {
-   *       calldata: [0n, ...initArgs],       // the constructor call
-   *     }).build();
-   *     const { waitForDeployment } = await deployment.submit();
-   *     const alkaneId = await waitForDeployment();
+   *     const deployment = await account
+   *       .deploy(wasm)
+   *       .call(MyContractAbi, "initialize", initArgs)
+   *       .build();
+   *     const alkaneId = await deployment.send().waitForDeployment();
    *
    * See `AlkaneDeployment` for what building entails (commit/reveal, priced
    * as a CPFP package, submitted through espo's `btc.submit_package`).
@@ -342,6 +381,34 @@ export class Account extends AlkanesAccount {
     psbt.finalizeAllInputs();
     return psbt.toBase64();
   }
+}
+
+/*
+  The two chain links. Each wraps a promise that is created ONCE, so however
+  far down the chain you await — the built transaction, its txid, its
+  confirmation — the same build and the same broadcast are behind all of it.
+
+  The inner value is boxed (`{ sent }`) on the way through `.then` because a
+  SentTx is itself a thenable: returned bare, the promise machinery would
+  flatten it to a txid and the `waitForConfirmation` handle would be lost.
+*/
+function sentTx(inFlight: Promise<Sent>): SentTx {
+  const txid = inFlight.then((s) => s.txid);
+  return Object.assign(txid, {
+    waitForConfirmation: () => inFlight.then((s) => s.waitForConfirmation()),
+  });
+}
+
+function building(inFlight: Promise<BuiltTx>): BuildingTx {
+  return Object.assign(inFlight, {
+    send: (): SentTx => {
+      const boxed = inFlight.then((built) => ({ sent: built.send() }));
+      const txid = boxed.then((b) => b.sent);
+      return Object.assign(txid, {
+        waitForConfirmation: () => boxed.then((b) => b.sent.waitForConfirmation()),
+      });
+    },
+  });
 }
 
 /*------------------------------------------------------------*
@@ -521,20 +588,51 @@ interface PendingInput {
   selector: number | "all";
 }
 
+/** What a broadcast answers internally: the txid, and how to wait it out. */
+interface Sent {
+  txid: string;
+  waitForConfirmation: () => Promise<void>;
+}
+
+/**
+ * A broadcast in flight. Await it for the txid, or keep chaining:
+ *
+ *     const txid = await tx.build().send();
+ *     await tx.build().send().waitForConfirmation();
+ *
+ * One send either way — the chain just decides how far you wait.
+ */
+export type SentTx = Promise<string> & {
+  waitForConfirmation: () => Promise<void>;
+};
+
+/**
+ * A build in flight. The chain ends wherever you stop awaiting it: the built
+ * transaction, its txid once sent, or nothing at all once it has confirmed.
+ */
+export type BuildingTx = Promise<BuiltTx> & {
+  send: () => SentTx;
+};
+
 /** A transaction after it has been built: real bytes, with a real txid. */
 export interface BuiltTx {
   hex: string;
   txid: string;
   /**
    * Broadcast this transaction — through espo, whose broadcaster hands it to
-   * electrum with a Bitcoin Core fallback — and get the txid plus a
-   * `waitForConfirmation` that resolves once the transaction is mined AND
-   * espo has indexed its block, so anything read afterwards sees its effects.
+   * electrum with a Bitcoin Core fallback.
+   *
+   *     const { txid } = await tx.send();          // just send it
+   *     await tx.send().waitForConfirmation();     // send and wait it out
+   *
+   * The waiting form is the same send — the broadcast happens once either
+   * way — and resolves once the transaction is mined AND espo has indexed
+   * its block, so anything read afterwards sees what it did.
    *
    * Refuses a transaction carrying placeholder witnesses: a `ViewAccount`
    * builds bytes a simulation accepts, not bytes a node will.
    */
-  send(): Promise<{ txid: string; waitForConfirmation: () => Promise<void> }>;
+  send(): SentTx;
   /**
    * What this transaction's own edicts put on each real output. Known because
    * we wrote them — a call's result is not, since only the simulation knows
@@ -810,7 +908,11 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
    * `context` is what the rest of the block has already done — see
    * `BlockContext`; callers inside a block pass it, people don't.
    */
-  async build(
+  build(options?: TxBuildOptions, context?: BlockContext): BuildingTx {
+    return building(this.buildTx(options, context));
+  }
+
+  private async buildTx(
     options?: TxBuildOptions,
     context?: BlockContext,
   ): Promise<BuiltTx> {
@@ -901,35 +1003,46 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
       signed,
       psbtBase64: unsigned,
       transaction,
-      async send() {
-        if (!this.signed) {
-          throw new Error(
-            `tx ${builtTxid}: built with placeholder witnesses — a view-only ` +
-              "account cannot send; use an Account that holds the key",
-          );
-        }
-        const sent = await account.provider.rpc.electrum.esplora_broadcastTx(this.hex);
-        if (isBoxedError(sent)) throw new Error(sent.message);
-        const txid = sent.data;
-        const waitForConfirmation = async () => {
-          // mined…
-          let height = 0;
-          for (;;) {
-            const tx = await account.provider.rpc.electrum.esplora_gettransaction(txid);
-            if (!isBoxedError(tx) && tx.data.status?.confirmed) {
-              height = tx.data.status.block_height ?? 0;
-              break;
+      send(): SentTx {
+        const hex = this.hex;
+        const signedNow = this.signed;
+        const broadcast = async (): Promise<Sent> => {
+          if (!signedNow) {
+            throw new Error(
+              `tx ${builtTxid}: built with placeholder witnesses — a view-only ` +
+                "account cannot send; use an Account that holds the key",
+            );
+          }
+          const sent = await account.provider.rpc.electrum.esplora_broadcastTx(hex);
+          if (isBoxedError(sent)) throw new Error(sent.message);
+          const txid = sent.data;
+          const waitForConfirmation = async () => {
+            // mined…
+            let height = 0;
+            for (;;) {
+              const tx = await account.provider.rpc.electrum.esplora_gettransaction(txid);
+              if (!isBoxedError(tx) && tx.data.status?.confirmed) {
+                height = tx.data.status.block_height ?? 0;
+                break;
+              }
+              await sleep(2000);
             }
-            await sleep(2000);
-          }
-          // …and indexed, so a read after this sees what the transaction did
-          for (;;) {
-            const tip = await account.provider.rpc.espo.getTipHeight();
-            if (!isBoxedError(tip) && tip.data.height >= height) return;
-            await sleep(1000);
-          }
+            // …and indexed, so a read after this sees what the transaction did
+            for (;;) {
+              const tip = await account.provider.rpc.espo.getTipHeight();
+              if (!isBoxedError(tip) && tip.data.height >= height) return;
+              await sleep(1000);
+            }
+          };
+          return { txid, waitForConfirmation };
         };
-        return { txid, waitForConfirmation };
+        /*
+          One send, two ways to hold it: the promise is created once here, so
+          awaiting for the txid and chaining `waitForConfirmation()` off it
+          broadcast the same transaction rather than racing two of them.
+        */
+        const inFlight = broadcast();
+        return sentTx(inFlight);
       },
     };
     return this.built;
@@ -1314,27 +1427,23 @@ function changeOutputs(
  * Nothing is unwrapped and nothing throws on a revert: each transaction comes
  * back with its own results.
  */
-export async function runSimulatedBlock<
-  T extends readonly AlkaneTx<any, any>[],
->(provider: Provider, txs: readonly [...T]): Promise<BlockResults<T>> {
-  if (txs.length === 0) return [] as unknown as BlockResults<T>;
-  // A transaction is built once and remembers its bytes, so the same AlkaneTx
-  // listed twice is the same transaction twice — a double-spend rather than a
-  // repeat. Two identical transactions have to be built separately.
-  if (new Set(txs).size !== txs.length) {
-    throw new Error(
-      "simulateBlock: the same transaction appears twice — build a second one " +
-        "instead of listing the same object again",
-    );
-  }
-
-  /*
-    Built in order, each transaction told what the ones before it did: which
-    outpoints they consumed, so nothing is spent twice, and what change they
-    produced, so a block can outspend the confirmed utxos an address happens to
-    hold. That is what a wallet does — the second transaction is paid for by the
-    first one's change.
-  */
+/**
+ * Build a dependent run of transactions, in order.
+ *
+ * Each is told what the ones before it did: which outpoints they consumed, so
+ * nothing is spent twice, and what change they produced, so the run can
+ * outspend the confirmed utxos an address happens to hold. That is what a
+ * wallet does — the second transaction is paid for by the first one's change,
+ * and `.spending()` is what lets it be paid in alkanes too.
+ *
+ * This is the building half of both `simulateBlock` and `sendPackage`: the
+ * same bytes either way, so what a package broadcasts is what a block
+ * simulated.
+ */
+export async function buildChain(
+  provider: Provider,
+  txs: readonly AlkaneTx<any, any>[],
+): Promise<BuiltTx[]> {
   const built: BuiltTx[] = [];
   const context: BlockContext = {
     spent: new Set(),
@@ -1350,6 +1459,24 @@ export async function runSimulatedBlock<
     context.available.push(...changeOutputs(one, tx.account, provider.network));
     built.push(one);
   }
+  return built;
+}
+
+export async function runSimulatedBlock<
+  T extends readonly AlkaneTx<any, any>[],
+>(provider: Provider, txs: readonly [...T]): Promise<BlockResults<T>> {
+  if (txs.length === 0) return [] as unknown as BlockResults<T>;
+  // A transaction is built once and remembers its bytes, so the same AlkaneTx
+  // listed twice is the same transaction twice — a double-spend rather than a
+  // repeat. Two identical transactions have to be built separately.
+  if (new Set(txs).size !== txs.length) {
+    throw new Error(
+      "simulateBlock: the same transaction appears twice — build a second one " +
+        "instead of listing the same object again",
+    );
+  }
+
+  const built = await buildChain(provider, txs);
 
   const block = await provider.simulateRawBlock(blockOf(built.map((b) => b.hex)));
   // txs[0] is the coinbase the wrapper put there, so ours start at 1

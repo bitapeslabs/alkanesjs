@@ -76,6 +76,7 @@ export const execute = async ({
   }
 };
 
+export * from "./amount";
 export * from "./types";
 export * from "./utils";
 export * from "./psbt";

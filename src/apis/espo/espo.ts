@@ -224,8 +224,15 @@ export class Espo {
     return typeof value === "bigint" ? value.toString() : value;
   }
 
-  private parseAmountString(value: EspoAmountString): number {
-    return Number(value) / 1e8;
+  /*
+    Amounts stay in the raw units espo sends. They are u128s — `Number(v)/1e8`
+    both loses precision past 2^53 and silently changes the unit, so a balance
+    could not be handed back to `.transfer()` without scaling it again. A
+    bigint of the smallest unit is what every other part of this SDK speaks;
+    `Amount.toString(v)` renders it for a human.
+  */
+  private parseAmountString(value: EspoAmountString): bigint {
+    return BigInt(value);
   }
 
   private normalizeBalanceEntry(entry: EspoBalanceEntryRaw): EspoBalanceEntry {
@@ -334,10 +341,10 @@ export class Espo {
 
   private normalizeBalancesRecord(
     balances: Record<EspoAlkaneId, EspoAmountString>
-  ): Record<EspoAlkaneId, number> {
-    const normalized: Record<EspoAlkaneId, number> = {} as Record<
+  ): Record<EspoAlkaneId, bigint> {
+    const normalized: Record<EspoAlkaneId, bigint> = {} as Record<
       EspoAlkaneId,
-      number
+      bigint
     >;
 
     for (const alkane of Object.keys(balances) as EspoAlkaneId[]) {
