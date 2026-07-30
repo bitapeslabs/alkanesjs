@@ -34,7 +34,7 @@
 
 import * as bitcoin from "bitcoinjs-lib";
 import { toXOnly } from "bitcoinjs-lib/src/psbt/bip371";
-import { AlkaneId, type AlkaneIdLike, FormattedUtxo } from "@/apis";
+import { AlkaneId, type AlkaneIdData, type AlkaneIdLike, FormattedUtxo } from "@/apis";
 import type { Provider } from "@/provider";
 import {
   BoxedError,
@@ -74,6 +74,7 @@ import * as bip39 from "bip39";
 import { BIP32Factory } from "bip32";
 import { ecc } from "@/crypto/ecc";
 import { AlkaneDeployment, type DeployOptions } from "./deploy";
+import { Amount, type AmountLike } from "./amount";
 
 /*------------------------------------------------------------*
  | What a contract has to expose to be callable from a tx      |
@@ -85,14 +86,14 @@ import { AlkaneDeployment, type DeployOptions } from "./deploy";
  * offer that contract's own methods with their own argument types.
  */
 export interface CallableContract<D = unknown> {
-  readonly alkaneId: AlkaneId;
+  readonly alkaneId: AlkaneIdData;
   /** Phantom — never read at runtime. */
   readonly __alkabi?: D;
   /** Encode `method`'s argument into the words a protostone message carries. */
   encodeCall(
     method: string,
     arg?: unknown,
-  ): { alkaneId: AlkaneId; calldata: bigint[]; outShape: unknown };
+  ): { alkaneId: AlkaneIdData; calldata: bigint[]; outShape: unknown };
   /** Turn returndata into this method's declared output type. */
   decodeReturn(bytes: Uint8Array, outShape: unknown): unknown;
 }
@@ -200,7 +201,7 @@ export abstract class AlkanesAccount {
    *
    *     const held = await alice.getBalances();
    *     held.amountOf("2:0")                   // 100000000n
-   *     Amount.toString(held.amountOf(TOKEN))  // "1"
+   *     Amount.fromBigint(held.amountOf(TOKEN)).string  // "1"
    *
    * Reads the asset address, since that is where an account's alkanes live.
    */
@@ -432,7 +433,7 @@ export interface TxBuildOptions {
 
 /** An amount of one alkane. */
 export interface AlkaneAmount {
-  id: AlkaneId;
+  id: AlkaneIdData;
   amount: bigint;
 }
 
@@ -477,7 +478,7 @@ const satsOf = (btc: number): number => {
 
 /** An alkane aimed at a shadow vout. */
 export interface ShadowEdict {
-  id: AlkaneId;
+  id: AlkaneIdData;
   amount: bigint;
   /** The shadow index that receives it — `1` is the first call. */
   to: number;
@@ -569,7 +570,7 @@ type ChainStone =
 
 /** An alkane moved by the transfer stone: to a person, or into a chain stone. */
 interface Handoff {
-  id: AlkaneId;
+  id: AlkaneIdData;
   amount: bigint;
   /** Exactly one of these: a recipient's address, or a shadow index. */
   address?: string;
@@ -829,12 +830,12 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
    * BTC is decimal, so it is a number. Sats go to people, not to shadow vouts
    * — a shadow vout is not an output and cannot hold them.
    */
-  transfer(asset: AlkaneId, amount: bigint, to: AlkanesAccount | string | number): this;
-  transfer(asset: "sats", amount: bigint, to: AlkanesAccount | string): this;
+  transfer(asset: AlkaneIdData, amount: AmountLike, to: AlkanesAccount | string | number): this;
+  transfer(asset: "sats", amount: AmountLike, to: AlkanesAccount | string): this;
   transfer(asset: "btc", amount: number, to: AlkanesAccount | string): this;
   transfer(
-    asset: AlkaneId | "sats" | "btc",
-    amount: bigint | number,
+    asset: AlkaneIdData | "sats" | "btc",
+    amount: AmountLike | number,
     to: AlkanesAccount | string | number,
   ): this {
     if (asset === "sats" || asset === "btc") {
@@ -844,14 +845,17 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
         );
       }
       this.payments.push({
-        sats: asset === "sats" ? Number(amount) : satsOf(amount as number),
+        sats:
+          asset === "sats"
+            ? Number(Amount.toBigint(amount as AmountLike))
+            : satsOf(amount as number),
         address: addressOf(to),
       });
       return this;
     }
     this.handoffs.push({
       id: asset,
-      amount: amount as bigint,
+      amount: Amount.toBigint(amount as AmountLike),
       ...(typeof to === "number" ? { shadow: to } : { address: addressOf(to) }),
     });
     return this;

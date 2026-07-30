@@ -1,4 +1,4 @@
-import { AlkaneId } from "@/apis";
+import { AlkaneId, type AlkaneIdData } from "@/apis";
 import { ISchemaAlkaneId } from "@/libs/schemas";
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -27,7 +27,7 @@ export function excludeFields<K, T extends object>(
 export type Expand<T> = T extends infer O ? { [K in keyof O]: O[K] } : never;
 
 export class ParsableAlkaneId {
-  constructor(public readonly alkaneId: AlkaneId | ISchemaAlkaneId) {}
+  constructor(public readonly alkaneId: AlkaneIdData | ISchemaAlkaneId) {}
 
   toSchemaAlkaneId(): ISchemaAlkaneId {
     return {
@@ -37,10 +37,7 @@ export class ParsableAlkaneId {
   }
 
   toAlkaneId(): AlkaneId {
-    return {
-      block: BigInt(this.alkaneId.block),
-      tx: BigInt(this.alkaneId.tx),
-    };
+    return new AlkaneId(this.alkaneId.block, this.alkaneId.tx);
   }
 }
 

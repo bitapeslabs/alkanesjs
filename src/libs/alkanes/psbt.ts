@@ -25,6 +25,7 @@ import type {
   FormattedUtxo,
   AlkanesUtxoEntry,
   AlkaneId,
+  AlkaneIdData,
   IEsploraTransaction,
   EspoSpendableOutpoint,
 } from "@/apis";
@@ -808,7 +809,7 @@ export class ProtostoneTransaction {
     return;
   }
 
-  private mappableAlkaneId(alkaneId: AlkaneId): string {
+  private mappableAlkaneId(alkaneId: AlkaneIdData): string {
     return `${Number(alkaneId.block)}:${Number(alkaneId.tx)}`;
   }
 
@@ -1419,7 +1420,7 @@ export type SingularBTCTransfer = {
 };
 
 export type SingularAlkanesTransfer = {
-  asset: AlkaneId; // Alkanes protocol ID (eg: 2:1231231)
+  asset: AlkaneIdData; // Alkanes protocol ID (eg: 2:1231231)
   amount: bigint;
   address: string;
 };

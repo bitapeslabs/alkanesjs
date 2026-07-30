@@ -16,7 +16,7 @@
 import type { BundledViewCall } from "../interfaces/base";
 import { BorshSchema } from "borsher";
 import type { ViewCallOptions } from "./wasm-runtime";
-import { AlkaneId } from "@/apis";
+import { AlkaneId, type AlkaneIdData } from "@/apis";
 import { Provider } from "@/provider";
 import { BoxedPromise, BoxedResponse, IBoxedError } from "@/boxed";
 import { AlkanesExecuteError } from "../alkanes";
@@ -249,7 +249,7 @@ export type ContractInstance<D extends AlkabiDocument> =
     encodeCall(
       method: string,
       arg?: unknown,
-    ): { alkaneId: AlkaneId; calldata: bigint[]; outShape: unknown };
+    ): { alkaneId: AlkaneIdData; calldata: bigint[]; outShape: unknown };
     /**
      * Phantom — never present at runtime. Carries the document type so a
      * transaction's `.call(contract)` can offer this contract's own methods.
@@ -316,7 +316,7 @@ class AlkanesContractImpl extends AlkanesBaseContract {
 
   constructor(
     document: AlkabiDocument,
-    alkaneId: AlkaneId,
+    alkaneId: AlkaneIdData,
     provider?: Provider,
     options: ContractOptions = {},
   ) {
@@ -374,7 +374,7 @@ class AlkanesContractImpl extends AlkanesBaseContract {
   encodeCall(
     method: string,
     arg?: unknown,
-  ): { alkaneId: AlkaneId; calldata: bigint[]; outShape: unknown } {
+  ): { alkaneId: AlkaneIdData; calldata: bigint[]; outShape: unknown } {
     const meta = this.methodMeta[method];
     if (!meta) {
       throw new Error(`${method}: no such method on this contract`);
@@ -445,7 +445,7 @@ class AlkanesContractImpl extends AlkanesBaseContract {
 export const Contract = AlkanesContractImpl as unknown as {
   new <const D extends AlkabiDocument>(
     document: D,
-    alkaneId: AlkaneId,
+    alkaneId: AlkaneIdData,
     provider?: Provider,
     options?: ContractOptions,
   ): ContractInstance<D>;

@@ -8,23 +8,74 @@ export type AlkaneEncoded = {
 } & EncodedAlkaneId;
 
 /**
+ * The structural shape of an id — just the two fields. This is the type
+ * every INPUT position in the SDK accepts, so a hand-written
+ * `{ block: 2n, tx: 0n }` works wherever an id is wanted; the `AlkaneId`
+ * class satisfies it too, being exactly this plus methods.
+ */
+export interface AlkaneIdData {
+  readonly block: bigint;
+  readonly tx: bigint;
+}
+
+/**
  * Which alkane. `block:tx`, the pair every contract, outpoint and edict names
  * an asset by.
  *
- * This is a class for the constructors — `AlkaneId.fromString("2:0")` beats
- * `{ block: 2n, tx: 0n }` to type — but it carries no instance methods ON
- * PURPOSE: the instance type is exactly `{ block: bigint; tx: bigint }`, so a
- * plain object literal is still assignable everywhere an AlkaneId is wanted.
- * The helpers are static for that reason; adding `id.toString()` would make
- * every hand-written object a type error.
+ * Ids the SDK hands BACK are instances, so the conversions read off them
+ * directly:
+ *
+ *     const id = await deployment.send().waitForDeployment();
+ *     id.toString()   // "2:74"
+ *     id.toSchema()   // { block: 74, tx: 74n } — the borsh argument shape
+ *     id.toObject()   // { block: 2n, tx: 74n } — plain data, methods shed
+ *     id.equals(other)
+ *
+ * Ids you WRITE can stay plain objects: input positions are typed
+ * `AlkaneIdData`, the structural shape above, which both literals and
+ * instances satisfy. The statics mirror the instance methods for exactly
+ * those values — `AlkaneId.toString(idLike)` works on anything id-shaped
+ * without constructing first.
  */
-export class AlkaneId {
+export class AlkaneId implements AlkaneIdData {
   readonly block: bigint;
   readonly tx: bigint;
 
   constructor(block: bigint | number | string, tx: bigint | number | string) {
     this.block = BigInt(block);
     this.tx = BigInt(tx);
+  }
+
+  /** `"2:0"` — the spelling espo, traces and wallets all use. Also what
+   *  template literals print, so `` `deployed ${id}` `` just works. */
+  toString(): string {
+    return `${this.block}:${this.tx}`;
+  }
+
+  /**
+   * The `SchemaAlkaneId` shape borsh arguments take — `block` a u32 number,
+   * `tx` a u64 bigint. Contracts declare their ids that way; the wire does
+   * not care, but the encoder does.
+   */
+  toSchema(): { block: number; tx: bigint } {
+    return { block: Number(this.block), tx: this.tx };
+  }
+
+  /** Plain `{ block, tx }` data — the instance with its methods shed. */
+  toObject(): AlkaneIdData {
+    return { block: this.block, tx: this.tx };
+  }
+
+  equals(other: AlkaneIdLike): boolean {
+    return AlkaneId.equal(this, other);
+  }
+
+  /**
+   * `JSON.stringify` support: serializes as the `"block:tx"` string instead
+   * of throwing on the bigint fields. `AlkaneId.from` reads it back.
+   */
+  toJSON(): string {
+    return this.toString();
   }
 
   /** `"2:0"` — the spelling espo, traces and wallets all use. */
@@ -68,13 +119,13 @@ export class AlkaneId {
 
 /** An id, however it was written down. */
 export type AlkaneIdLike =
-  | AlkaneId
+  | AlkaneIdData
   | string
   | { block: bigint | number; tx: bigint | number };
 
 export type Alkane = {
   value: bigint; // in satoshis
-} & AlkaneId;
+} & AlkaneIdData;
 
 export interface AlkaneRune {
   rune: {
@@ -158,7 +209,7 @@ export interface AlkaneSimulateRequest {
   transaction?: string;
   height?: string;
   txindex?: number;
-  target: AlkaneId;
+  target: AlkaneIdData;
   callData: bigint[];
   pointer?: number;
   refundPointer?: number;

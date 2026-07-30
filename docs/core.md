@@ -110,28 +110,70 @@ package, at `.send()` for the txids, at `.waitForDeployment()` for the id.
 
 ## `AlkaneId`
 
-Ids are `{ block: bigint, tx: bigint }`. The class adds constructors and
-helpers as **statics**, so plain object literals stay assignable — a hand
-written `{ block: 2n, tx: 0n }` is a valid `AlkaneId` everywhere.
+Ids are `{ block: bigint, tx: bigint }`. Ids the SDK hands **back** — a
+deployment's id, `balances.alkanes()` — are `AlkaneId` instances, and the
+conversions read straight off them:
+
+```ts
+const id = await deployment.send().waitForDeployment();
+
+id.toString()      // "2:74" — the universal spelling; `${id}` prints it too
+id.toSchema()      // { block: 2, tx: 74n } — the borsh argument shape
+id.toObject()      // { block: 2n, tx: 74n } — plain data, methods shed
+id.equals(other)   // structural equality, accepts anything id-shaped
+JSON.stringify(id) // '"2:74"' — toJSON() sidesteps the bigint restriction
+```
+
+Ids you **write** can stay plain: every input position in the SDK is typed
+`AlkaneIdData` — the structural `{ block, tx }` shape — so a hand-written
+`{ block: 2n, tx: 0n }` is accepted wherever an id is wanted, alongside real
+instances. The statics mirror the instance methods for exactly those values,
+converting without constructing:
 
 ```ts
 AlkaneId.fromString("2:0")        // parse the universal spelling
 AlkaneId.from(idLike)             // normalize string | {block,tx} | AlkaneId
-AlkaneId.toString(id)             // "2:0"
-AlkaneId.toSchema(id)             // { block: number, tx: bigint } — the borsh shape
+AlkaneId.toString(idLike)         // "2:0"
+AlkaneId.toSchema(idLike)         // the borsh shape, from anything id-shaped
 AlkaneId.equal(a, b)
 ```
 
+Rule of thumb: got an instance, use its methods; got something merely
+id-shaped, use the statics (or `AlkaneId.from` it once and keep the
+instance).
+
 ## `Amount`
 
-Token amounts are `bigint`s in base units (8 decimals). `Amount` converts
-human numbers losslessly — `fromString` never lets the digits become a float:
+An `Amount` wraps a base-unit value (8 decimals by default) and answers in
+whichever form you need. **The constructor is decided by what you hold**,
+because the type tells the denomination: numbers and decimal strings are how
+humans write *tokens*, so they scale; bigints and base-unit strings are how
+the *wire* speaks, so they are taken verbatim:
 
 ```ts
-Amount.fromNumber(1)         // 100000000n
-Amount.fromString("2.221")   // 222100000n — exact
-Amount.toString(150000000n)  // "1.5"
+Amount.fromNumber(1)               // 1 token
+Amount.fromString("2.221")         // 2.221 tokens — exact, digits never float
+Amount.fromBigint(viewResult)      // base units — what views and balances return
+Amount.fromBaseUnits("222100000")  // base units as text — what espo reports
 ```
+
+Four forms read off any of them:
+
+```ts
+const amt = Amount.fromString("2.221");
+amt.bigint            // 222100000n — the wire value, what calldata wants
+amt.stringBaseUnits   // "222100000"
+amt.string            // "2.221" — every digit kept; `${amt}` prints this
+amt.number            // 2.221 — lossy above 2^53, display only
+amt.toLocaleString()  // "2.221" with locale grouping ("1,234.5")
+JSON.stringify(amt)   // '"222100000"' — the exact form; fromBaseUnits reads it back
+```
+
+`transfer()` accepts an `Amount` or a plain bigint interchangeably
+(`AmountLike`); borsh call arguments are typed `bigint`, so hand them
+`.bigint`. The trap the names guard: `fromString("2.221")` reads tokens,
+`fromBaseUnits` refuses anything with a decimal point — handing text to the
+wrong one would be silently off by 10^8.
 
 ## `bitcoin`
 

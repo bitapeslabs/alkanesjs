@@ -229,7 +229,7 @@ export class Espo {
     both loses precision past 2^53 and silently changes the unit, so a balance
     could not be handed back to `.transfer()` without scaling it again. A
     bigint of the smallest unit is what every other part of this SDK speaks;
-    `Amount.toString(v)` renders it for a human.
+    `Amount.fromBigint(v).string` renders it for a human.
   */
   private parseAmountString(value: EspoAmountString): bigint {
     return BigInt(value);

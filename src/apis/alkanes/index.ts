@@ -9,7 +9,7 @@ import {
 import {
   AlkanesByAddressResponse,
   AlkanesOutpoint,
-  AlkaneId,
+  AlkaneId, type AlkaneIdData,
   AlkaneSimulateRequest,
   AlkanesRawSimulationResponse,
   AlkanesSimulationResult,
@@ -143,7 +143,7 @@ export class AlkanesRpcProvider {
     };
   }
 
-  alkanes_getAlkaneById(id: AlkaneId) {
+  alkanes_getAlkaneById(id: AlkaneIdData) {
     return this.rpc("alkanes_meta", [
       {
         target: {

@@ -6,7 +6,7 @@ import {
   BoxedError,
   consumeOrThrow,
 } from "@/boxed";
-import { AlkaneId } from "@/apis";
+import { AlkaneId, type AlkaneIdData } from "@/apis";
 import { Provider } from "@/provider";
 /**
  * What a contract needs from whoever holds it: a provider to ask through and
@@ -88,7 +88,7 @@ export abstract class AlkanesBaseContract {
      * to sign, and a view-only account answers that by refusing.
      */
     protected readonly account: ContractHost,
-    public readonly alkaneId: AlkaneId,
+    public readonly alkaneId: AlkaneIdData,
   ) {}
   protected abstract get OpCodes(): OpcodeTable;
 

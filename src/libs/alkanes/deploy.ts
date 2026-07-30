@@ -51,7 +51,7 @@ import {
   ProtoStone,
 } from "alkanes";
 
-import type { AlkaneId, FormattedUtxo } from "@/apis";
+import { AlkaneId, type FormattedUtxo } from "@/apis";
 import { consumeOrThrow, isBoxedError } from "@/boxed";
 import { sleep } from "@/utils";
 import type { AlkabiDocument } from "../alkabi/types";
@@ -236,7 +236,7 @@ export class DeploymentPackage {
           const create = events.find((e) => e.event === "create");
           if (create) {
             const id = create.data as { block: string; tx: string };
-            return { block: BigInt(id.block), tx: BigInt(id.tx) };
+            return new AlkaneId(id.block, id.tx);
           }
           // traced, but nothing was created: the constructor reverted
           if (events.length > 0) {
