@@ -6,6 +6,10 @@ protostone transactions (including dependent CPFP packages), and read back
 what they did. Small bundle, strict types, no oyl/sdk dependency — execute,
 simulate and trace are implemented here.
 
+```sh
+npm i alkanesjs
+```
+
 A whole flow, start to finish — a fresh wallet, funded from the regtest
 faucet, minting DIESEL. Copy it and run it:
 
