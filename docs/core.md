@@ -18,14 +18,40 @@ import {
 ## `Provider`
 
 One object holding the endpoints and the network. Everything else is
-constructed against it.
+constructed against it. For the hosted infrastructure, two come predefined:
+
+```ts
+import { networks } from "alkanesjs";
+
+networks.Mainnet   // hosted kirby + espo, mainnet
+networks.Regtest   // the hosted regtest pair, play money, and a faucet
+```
+
+Each is usable two ways. Reached as a value it **is** a provider — quiet, no
+logging. **Called**, it builds a fresh one with whatever you want changed:
+
+```ts
+networks.Regtest                        // the shared provider, debug off
+networks.Regtest({ debug: 1 })          // same endpoints, wire logging on
+networks.Mainnet({ defaultFeeRate: 8 })
+```
+
+Calling always returns a NEW provider and never disturbs the shared one. The
+value form is built on first use and reused, so everything that reaches for
+`networks.Mainnet` shares one pacer and one set of RPC clients.
+
+Note that logging itself is global — one wrapper around one fetch — so
+`{ debug: 1 }` anywhere turns it on everywhere. `provider.setDebug(n)` and
+the root's `setFetchDebug(n)` are the same switch.
+
+These are ordinary `Provider` instances; construct your own to point at
+other endpoints or choose your own fee rate:
 
 ```ts
 const provider = new Provider({
   metashrewUrl: "https://kirby.alkanode.com/rpc", // simulation + views
   espoUrl: "https://api.alkanode.com/rpc",        // index + broadcast
   network: bitcoin.networks.bitcoin,
-  explorerUrl: "https://mempool.space",
   defaultFeeRate: 3,                              // sat/vB, overridable per tx
 });
 ```
@@ -50,8 +76,19 @@ Same building API, so simulation code and production code read identically.
 ```ts
 const me = Account.fromWIF(wif, provider);
 const her = Account.fromMnemonic(mnemonic, provider);  // BIP39 → BIP86 taproot
+const fresh = Account.generate(provider);              // a brand new wallet
 const watch = ViewAccount.fromAddress(address, provider);
 ```
+
+Every account is **taproot** unless `addressType` says otherwise
+(`"nativeSegwit"`, `"nestedSegwit"`, `"legacy"`), and each type derives under
+its conventional BIP purpose — 86, 84, 49, 44.
+
+`Account.generate(provider)` makes a fresh BIP39 wallet — taproot, index 0,
+12 words (`{ words: 24 }` for 256 bits of entropy). It is a full HD account:
+`setIndex` walks it, `exportMnemonic` hands back the phrase. Nothing
+persists it, so export the mnemonic and keep it somewhere before paying the
+address, or the funds are unrecoverable.
 
 - `me.address()` — the BTC address; `me.assetAddress()` — where alkanes live.
 - `me.tx()` — start a transaction. The whole builder is documented in
@@ -64,6 +101,44 @@ const balances = await me.getBalances();   // Balances extends Map<string, bigin
 balances.amountOf(tortilla);               // bigint — 0n when absent
 balances.alkanes();                        // AlkaneId[] — everything held
 ```
+
+### Walking an HD wallet
+
+An account from a mnemonic is one address of a wallet, and can walk to the
+others. `setIndex` re-derives in place — a different address AND a different
+signing key — and returns the account, so it chains:
+
+```ts
+const wallet = Account.fromMnemonic(words, provider);
+
+wallet.index;                    // 0 — where the walk starts
+wallet.address();                // …the first address
+wallet.setIndex(1).address();    // …the second, now signing with its key
+wallet.isHD;                     // true
+```
+
+`index` is `null` — and `setIndex` throws — for an account with no walk to
+take: one from a WIF, one behind an external signer, or one derived at an
+explicit `path` (a verbatim path is not a position on a walk).
+
+Everything reads the address and key at **build** time, so transactions built
+after a `setIndex` use the new index. A transaction already built is already
+signed and keeps the key it was signed with — so build, send, then walk.
+
+### Exporting key material
+
+```ts
+me.exportWIF();        // this account's private key, in WIF
+me.exportMnemonic();   // the seed phrase — HD accounts only
+```
+
+For an HD account `exportWIF()` gives the key at the **current** index; walk
+and export again for another. `exportWIF` throws behind an external signer
+(the wallet holds the key, the SDK never sees it), and `exportMnemonic`
+throws for anything not derived from a mnemonic.
+
+Both hand out spending authority as a string — a mnemonic over the whole
+wallet, not just one index. Never log one, never send one anywhere.
 
 ## `Contract`
 

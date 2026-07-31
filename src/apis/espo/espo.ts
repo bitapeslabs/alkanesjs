@@ -89,6 +89,9 @@ import {
   EspoGetBestMevSwapResult,
   EspoGetBestMevSwapRpcOk,
   EspoGetBestMevSwapRpcResult,
+  EspoFaucetAsset,
+  EspoFaucetRequestResult,
+  EspoFaucetStatusResult,
   EspoSubmitPackageResult,
   EspoAlkabiFormat,
   EspoGetAlkabi,
@@ -638,6 +641,41 @@ export class Espo {
     return RpcCall<EspoSubmitPackageResult>(this.rpc_url, "btc.submit_package", {
       txs: txsHex,
     }).call();
+  }
+
+  /**
+   * `btc.faucet_request`: ask the regtest faucet for coins. `amount` and
+   * `asset` are optional — the faucet's own defaults apply, and it
+   * rate-limits per caller IP.
+   *
+   * Regtest only, and only where a faucet is configured: everywhere else
+   * this is not a method at all, and the node answers `Method not found`.
+   */
+  public faucetRequest(
+    address: string,
+    amount?: number,
+    asset?: EspoFaucetAsset
+  ): Promise<BoxedResponse<EspoFaucetRequestResult, string>> {
+    return RpcCall<EspoFaucetRequestResult>(this.rpc_url, "btc.faucet_request", {
+      address,
+      ...(amount === undefined ? {} : { amount }),
+      ...(asset === undefined ? {} : { asset }),
+    }).call();
+  }
+
+  /**
+   * `btc.faucet_status`: the faucet's per-asset availability, limits and
+   * remaining balance, as it reports them. Same regtest-and-configured gate
+   * as `faucetRequest`.
+   */
+  public faucetStatus(): Promise<
+    BoxedResponse<EspoFaucetStatusResult, string>
+  > {
+    return RpcCall<EspoFaucetStatusResult>(
+      this.rpc_url,
+      "btc.faucet_status",
+      {}
+    ).call();
   }
 
   /**

@@ -53,6 +53,7 @@ import {
 
 import { AlkaneId, type FormattedUtxo } from "@/apis";
 import { consumeOrThrow, isBoxedError } from "@/boxed";
+import { tracesOf, type ConfirmedTrace } from "./confirm";
 import { sleep } from "@/utils";
 import type { AlkabiDocument } from "../alkabi/types";
 import { Contract } from "../alkabi/contract";
@@ -107,6 +108,37 @@ export interface DeploymentTx {
 }
 
 /**
+ * A deployed contract's id, plus the traces of the reveal that created it —
+ * so the constructor's own execution is inspectable without a second lookup.
+ *
+ *     const id = await deployment.send().waitForDeployment();
+ *     id.toString();                 // "2:74" — an AlkaneId in every way
+ *     for (const t of id.traces) console.log(t.outpoint, t.ok);
+ *
+ * It IS an `AlkaneId`, so it goes anywhere one goes.
+ */
+export class DeployedAlkane extends AlkaneId {
+  constructor(
+    block: bigint | number | string,
+    tx: bigint | number | string,
+    /** The reveal's traces — the constructor call among them. */
+    readonly traces: ConfirmedTrace[],
+  ) {
+    super(block, tx);
+  }
+
+  /** True when no protostone of the reveal reverted. */
+  get ok(): boolean {
+    return this.traces.every((t) => t.ok);
+  }
+
+  /** The first revert reason, if any did. */
+  get error(): string | undefined {
+    return this.traces.find((t) => !t.ok)?.error;
+  }
+}
+
+/**
  * What `send()` answers: the txids as accepted, and a `waitForDeployment`
  * that resolves to the contract's alkane id once the reveal is mined, espo
  * has indexed its block, and the trace's `create` event names the id.
@@ -114,7 +146,7 @@ export interface DeploymentTx {
 export interface SubmittedDeployment {
   commitTxid: string;
   revealTxid: string;
-  waitForDeployment: () => Promise<AlkaneId>;
+  waitForDeployment: () => Promise<DeployedAlkane>;
 }
 
 /**
@@ -125,7 +157,7 @@ export type SentDeployment = Promise<{
   commitTxid: string;
   revealTxid: string;
 }> & {
-  waitForDeployment: () => Promise<AlkaneId>;
+  waitForDeployment: () => Promise<DeployedAlkane>;
 };
 
 /**
@@ -209,7 +241,7 @@ export class DeploymentPackage {
 
     const revealTxid = this.revealTx.txid;
 
-    const waitForDeployment = async (): Promise<AlkaneId> => {
+    const waitForDeployment = async (): Promise<DeployedAlkane> => {
       // mined…
       consumeOrThrow(await provider.waitForConfirmation(revealTxid));
 
@@ -236,7 +268,11 @@ export class DeploymentPackage {
           const create = events.find((e) => e.event === "create");
           if (create) {
             const id = create.data as { block: string; tx: string };
-            return new AlkaneId(id.block, id.tx);
+            return new DeployedAlkane(
+              id.block,
+              id.tx,
+              await tracesOf(provider, revealTxid),
+            );
           }
           // traced, but nothing was created: the constructor reverted
           if (events.length > 0) {

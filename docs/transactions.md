@@ -58,12 +58,83 @@ matter how many handles you hold:
 
 ```ts
 const built = await tx.build();                      // BuiltTx — bytes, txid, holds
-const txid  = await tx.build().send();               // broadcast through espo
+const sent  = await tx.build().send();               // Sent — txid + the waiter
 await tx.build().send().waitForConfirmation();       // mined AND indexed
 ```
 
+Awaiting `.send()` resolves to a **`Sent`** that keeps both handles, so the
+common shape — send, note the txid, wait — needs only one await:
+
+```ts
+const sent = await tx.build().send();
+console.log(`broadcast ${sent.txid}`);     // `${sent}` prints the txid too
+await sent.waitForConfirmation();
+```
+
+`Sent` prints and JSON-serializes as its txid, and the un-awaited handle
+carries shortcuts for the ends of the chain — `tx.build().send().txid`
+resolves to just the txid string. However the send is held, it is ONE
+broadcast: every handle shares the same in-flight promise.
+
+### What waiting gives you
+
+**Confirmed is not succeeded** — a protostone can revert and the transaction
+still mines. So `waitForConfirmation()` resolves to a `Confirmed`: the
+transaction plus what its protostones actually did.
+
+```ts
+const done = await tx.build().send().waitForConfirmation();
+
+done.txid;
+done.ok;       // false when any protostone reverted
+done.error;    // "…: transfer of admin alkane id not found"
+done.traces;   // one entry per protostone: { outpoint, events, ok, error? }
+```
+
+Each trace's `events` are decoded ([traces.md](./traces.md)), so the whole
+execution is inspectable without a second lookup. `ok` means *nothing
+reverted* — a transaction that ran no protostones (a plain payment, a faucet
+payout) has no traces and reads as ok.
+
+Deployments answer the same way: `waitForDeployment()` resolves to a
+`DeployedAlkane`, which **is** an `AlkaneId` — it goes anywhere one goes —
+carrying the reveal's `traces`, `ok` and `error`, so the constructor's own
+execution is inspectable too. `provider.sendPackage(…).waitForConfirmation()`
+gives one `Confirmed` per transaction, in order.
+
+A `BuiltTx` already knows its `txid` (and `hex`) *before* broadcasting —
+txids are a function of the bytes — which is what makes logging or persisting
+it ahead of `.send()` possible.
+
 `waitForConfirmation()` resolves only when espo has indexed the block too, so
 any read afterwards sees what the transaction did.
+
+## The faucet (regtest)
+
+`requestFaucet` asks the regtest faucet to pay the account. It is not a
+transaction this wallet builds — the faucet builds and broadcasts it — so
+nothing else on the chain applies, and it ends the chain:
+
+```ts
+await alice.tx().requestFaucet();                        // just ask
+await alice.tx().requestFaucet().waitForConfirmation();  // ask and wait it out
+const { txid } = await alice.tx().requestFaucet({ amount: 0.5 });
+```
+
+What comes back is the same `Sent` a broadcast of your own gives, because
+from here on it is the same thing: a txid to watch. `waitForConfirmation()`
+resolves to that `Sent`, so a waited chain still ends at something with a
+txid on it.
+
+Options are all optional: `amount` (the faucet's own default otherwise),
+`asset` (`"rbtc"` default, or `"diesel"`), and `to`. Without `to`, coins go
+to the address that *holds* that asset for the account — the payment address
+for rbtc, the asset address for an alkane like diesel.
+
+**Regtest only.** It throws anywhere else rather than asking, because a
+mainnet espo does not serve the method at all. The faucet rate-limits per
+caller IP; `provider.rpc.espo.faucetStatus()` reports the per-asset limits
+and what is left.
 
 ## Simulation
 

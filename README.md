@@ -6,29 +6,43 @@ protostone transactions (including dependent CPFP packages), and read back
 what they did. Small bundle, strict types, no oyl/sdk dependency — execute,
 simulate and trace are implemented here.
 
+A whole flow, start to finish — a fresh wallet, funded from the regtest
+faucet, minting DIESEL. Copy it and run it:
+
 ```ts
-import { Account, AlkaneId, Contract, Provider, bitcoin } from "alkanesjs";
+import { Account, AlkaneId, Contract, networks } from "alkanesjs";
+import { TokenAbi } from "alkanesjs/abis";
 
-const provider = new Provider({
-  metashrewUrl: "https://kirby.alkanode.com/rpc",
-  espoUrl: "https://api.alkanode.com/rpc",
-  network: bitcoin.networks.bitcoin,
-  explorerUrl: "https://mempool.space",
-  defaultFeeRate: 3,
-});
+const DIESEL = AlkaneId.fromString("2:0");
 
-const me = Account.fromWIF(WIF, provider);
-const token = new Contract(MyTokenAbi, AlkaneId.fromString("2:123"), provider);
+const me = Account.generate(networks.Regtest);
+const diesel = new Contract(TokenAbi, DIESEL, networks.Regtest);
 
-const name = await token.getName().unwrap();          // a view — simulated
+const start = async () => {
+  // a brand new wallet has nothing, so ask the regtest faucet for coins
+  console.log("Requesting rBTC from faucet to initiate a mint...");
+  const faucet = await me.tx().requestFaucet({ amount: 0.1 }).waitForConfirmation();
+  console.log(`Faucet TX confirmed: https://regtest.espo.sh/tx/${faucet.txid}`);
 
-await me                                              // a state change
-  .tx()
-  .call(token, "mint", { amount: 5n })
-  .build()
-  .send()
-  .waitForConfirmation();
+  // a view — simulated, nothing broadcast
+  const name = await diesel.getName().unwrap();
+
+  // a state change — built, signed, broadcast
+  console.log(`Minting ${name}..`);
+  const sent = await me.tx().call(diesel, "mintTokens").build().send();
+  console.log(`Waiting for TX: https://regtest.espo.sh/tx/${sent.txid}`);
+
+  // confirmed is not succeeded — the traces say what the protostones did
+  const done = await sent.waitForConfirmation();
+  console.log(done.ok ? done.traces : `reverted: ${done.error}`);
+};
+
+start();
 ```
+
+Everything in it is real: `Account.generate` makes a BIP39 wallet,
+`requestFaucet` is regtest-only, `TokenAbi` ships with the package, and
+`done.traces` is what the mint's protostone actually did.
 
 ## Entries
 
@@ -42,14 +56,15 @@ after its purpose:
 | `alkanesjs/boxed` | result handling: `consumeOrThrow`, `isBoxedError`, … |
 | `alkanesjs/traces` | decoding what protostones did |
 | `alkanesjs/abi` | alkabi documents: overrides, local wasm views |
+| `alkanesjs/abis` | shipped ABI documents: Oyl AMM, frBTC, plain tokens |
 | `alkanesjs/utils/amm` | constant-product pool math |
 | `alkanesjs/utils/frbtc` | frBTC premium math + live signer lookup |
 | `alkanesjs/wallets` | browser wallet connectors (SSR-safe) |
-| `alkanesjs/debug` | wire-level request logging |
 
-alkanesjs defines **no contracts** — no hardcoded ids, ABIs or opcode
-tables. You bring the ABI document your contract's build emitted; the SDK
-brings the machinery.
+alkanesjs binds **no contracts** — no hardcoded ids, no opcode tables in
+code. ABI documents for widely-deployed contracts ship as data under
+`alkanesjs/abis`; for your own contracts you bring the document the build
+emitted, and the SDK brings the machinery either way.
 
 ## Documentation
 

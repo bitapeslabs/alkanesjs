@@ -35,6 +35,7 @@
 import * as bitcoin from "bitcoinjs-lib";
 import { toXOnly } from "bitcoinjs-lib/src/psbt/bip371";
 import { AlkaneId, type AlkaneIdData, type AlkaneIdLike, FormattedUtxo } from "@/apis";
+import type { EspoFaucetAsset } from "@/apis/espo/types";
 import type { Provider } from "@/provider";
 import {
   BoxedError,
@@ -75,6 +76,14 @@ import { BIP32Factory } from "bip32";
 import { ecc } from "@/crypto/ecc";
 import { AlkaneDeployment, type DeployOptions } from "./deploy";
 import { Amount, type AmountLike } from "./amount";
+import { Confirmed, Sent, awaitConfirmed, tracesOf } from "./confirm";
+
+export {
+  Confirmed,
+  Sent,
+  tracesOf,
+  type ConfirmedTrace,
+} from "./confirm";
 
 /*------------------------------------------------------------*
  | What a contract has to expose to be callable from a tx      |
@@ -128,6 +137,17 @@ const BIP_PURPOSE: Record<AccountAddressType, number> = {
   legacy: 44,
 };
 
+/**
+ * What an account derived from a mnemonic remembers, so it can re-derive at
+ * another index. `index` is null when an explicit `path` was given: a
+ * verbatim path is not a position on a walk, so there is nothing to step.
+ */
+interface HdWallet {
+  mnemonic: string;
+  addressType: AccountAddressType;
+  index: number | null;
+}
+
 /** The address a keypair presents as, in the chosen encoding. */
 function addressOfKey(
   keypair: ReturnType<typeof EcPair.fromWIF>,
@@ -153,6 +173,17 @@ function addressOfKey(
   }
 }
 
+/** The key at one BIP32 path of a mnemonic's seed. */
+function deriveKey(
+  mnemonic: string,
+  path: string,
+  network: bitcoin.Network,
+): ReturnType<typeof EcPair.fromWIF> {
+  const seed = bip39.mnemonicToSeedSync(mnemonic);
+  const node = BIP32Factory(ecc).fromSeed(seed, network).derivePath(path);
+  return EcPair.fromPrivateKey(Buffer.from(node.privateKey!), { network });
+}
+
 /**
  * Someone who can spend — or at least ask. Holds the addresses transactions
  * are built from, and the provider they are asked through. This is the base
@@ -165,7 +196,12 @@ function addressOfKey(
  *                     simulation checks a signature — but it cannot sign.
  */
 export abstract class AlkanesAccount {
-  readonly addresses: TransactionAddresses;
+  /**
+   * Not readonly: an HD account re-derives it on `setIndex`. Everything that
+   * reads it (the tx builder, deployments) reads at build time, so a rotated
+   * account builds against the address it holds now.
+   */
+  addresses: TransactionAddresses;
 
   protected constructor(
     readonly provider: Provider,
@@ -262,14 +298,22 @@ export class ViewAccount extends AlkanesAccount {
  * signatures, which is what makes them broadcastable.
  */
 export class Account extends AlkanesAccount {
+  /** Reassigned by `setIndex` on an HD account; fixed otherwise. */
+  private keypair?: ReturnType<typeof EcPair.fromWIF>;
+  /** Present only for an account derived from a mnemonic. */
+  private hd?: HdWallet;
+
   private constructor(
     provider: Provider,
     addresses: TransactionAddressInput,
-    private readonly keypair?: ReturnType<typeof EcPair.fromWIF>,
+    keypair?: ReturnType<typeof EcPair.fromWIF>,
     private readonly externalSigner?: (unsigned: string) => Promise<string>,
     feeRate?: number,
+    hd?: HdWallet,
   ) {
     super(provider, addresses, feeRate);
+    this.keypair = keypair;
+    this.hd = hd;
   }
 
   /**
@@ -290,6 +334,29 @@ export class Account extends AlkanesAccount {
       provider.network,
     );
     return new Account(provider, address, keypair, undefined, options.feeRate);
+  }
+
+  /**
+   * A brand new wallet — a fresh BIP39 mnemonic, taproot, index 0.
+   *
+   *     const wallet = Account.generate(provider);
+   *     console.log(wallet.exportMnemonic());   // WRITE THIS DOWN
+   *     console.log(wallet.address());
+   *
+   * The result is a full HD account: `setIndex` walks it, `exportMnemonic`
+   * hands back the phrase. `words` picks the phrase length (12 by default,
+   * or 24 for 256 bits of entropy).
+   *
+   * Nothing persists this. The mnemonic exists only in the returned object,
+   * so anything paid to the address is unrecoverable unless it is exported
+   * and kept somewhere first.
+   */
+  static generate(
+    provider: Provider,
+    options: AccountOptions & { words?: 12 | 24 } = {},
+  ): Account {
+    const strength = options.words === 24 ? 256 : 128;
+    return Account.fromMnemonic(bip39.generateMnemonic(strength), provider, options);
   }
 
   /**
@@ -319,15 +386,16 @@ export class Account extends AlkanesAccount {
     }
     const path =
       options.path ?? `m/${BIP_PURPOSE[addressType]}'/0'/0'/0/${index}`;
-    const seed = bip39.mnemonicToSeedSync(mnemonic);
-    const node = BIP32Factory(ecc)
-      .fromSeed(seed, provider.network)
-      .derivePath(path);
-    const keypair = EcPair.fromPrivateKey(Buffer.from(node.privateKey!), {
-      network: provider.network,
-    });
+    const keypair = deriveKey(mnemonic, path, provider.network);
     const address = addressOfKey(keypair, addressType, provider.network);
-    return new Account(provider, address, keypair, undefined, options.feeRate);
+    return new Account(
+      provider,
+      address,
+      keypair,
+      undefined,
+      options.feeRate,
+      { mnemonic, addressType, index: options.path ? null : index },
+    );
   }
 
   /**
@@ -345,6 +413,116 @@ export class Account extends AlkanesAccount {
 
   get canSign(): boolean {
     return true;
+  }
+
+  /*── key material ──────────────────────────────────────────────*/
+
+  /**
+   * This account's private key, in WIF.
+   *
+   *     const wif = alice.exportWIF();
+   *
+   * For an HD account this is the key at the CURRENT index — walk with
+   * `setIndex` and export again to get another. Throws for an account backed
+   * by an external signer (a browser wallet holds the key; the SDK never
+   * sees it).
+   *
+   * Exporting is spending authority in a string: whoever holds it holds the
+   * funds. Never log one, never send one anywhere.
+   */
+  exportWIF(): string {
+    if (!this.keypair) {
+      throw new Error(
+        `Account(${this.address()}): backed by an external signer — the ` +
+          "wallet holds the key, so there is nothing here to export",
+      );
+    }
+    return this.keypair.toWIF();
+  }
+
+  /**
+   * The BIP39 mnemonic this account was derived from.
+   *
+   * Only an account made with `fromMnemonic` has one — a WIF is a single key
+   * with no seed behind it, so there is nothing to reconstruct. Throws
+   * otherwise.
+   *
+   * A mnemonic is authority over EVERY key in the wallet, not just this
+   * index. Treat it accordingly.
+   */
+  exportMnemonic(): string {
+    if (!this.hd) {
+      throw new Error(
+        `Account(${this.address()}): not derived from a mnemonic — a WIF ` +
+          "(or an external signer) has no seed phrase behind it",
+      );
+    }
+    return this.hd.mnemonic;
+  }
+
+  /*── HD wallet ─────────────────────────────────────────────────*/
+
+  /** Whether this account was derived from a mnemonic and can be walked. */
+  get isHD(): boolean {
+    return this.hd !== undefined;
+  }
+
+  /**
+   * Which address of the HD wallet this account is on — the last element of
+   * `m/{purpose}'/0'/0'/0/{index}`.
+   *
+   * `null` when there is no position to report: an account from a WIF or an
+   * external signer, or one derived at an explicit `path` (a verbatim path is
+   * not a step on a walk).
+   */
+  get index(): number | null {
+    return this.hd?.index ?? null;
+  }
+
+  /**
+   * Walk the HD wallet to another index — a different address, and a
+   * different key to sign with:
+   *
+   *     const wallet = Account.fromMnemonic(words, provider);
+   *     wallet.address();            // …the first address
+   *     wallet.setIndex(1).address() // …the second
+   *
+   * Mutates in place and returns itself, so one account can walk a wallet
+   * rather than each index needing its own object. Everything reads the
+   * address and the key at BUILD time, so transactions built after this use
+   * the new index — but a transaction already built is already signed, and
+   * keeps the key it was signed with.
+   *
+   * Throws for an account with no walk to take: no mnemonic behind it, or
+   * derived at an explicit path.
+   */
+  setIndex(index: number): this {
+    if (!this.hd) {
+      throw new Error(
+        `Account(${this.address()}): not derived from a mnemonic — there is ` +
+          "no HD wallet to walk (use Account.fromMnemonic)",
+      );
+    }
+    if (this.hd.index === null) {
+      throw new Error(
+        `Account(${this.address()}): derived at an explicit path, which is ` +
+          "not a position on a walk — omit `path` to use indices",
+      );
+    }
+    if (!Number.isInteger(index) || index < 0) {
+      throw new Error(
+        `Account.setIndex: ${index} is not a valid HD wallet index`,
+      );
+    }
+
+    const { mnemonic, addressType } = this.hd;
+    const path = `m/${BIP_PURPOSE[addressType]}'/0'/0'/0/${index}`;
+    this.keypair = deriveKey(mnemonic, path, this.provider.network);
+    this.addresses = normalizeTransactionAddresses(
+      addressOfKey(this.keypair, addressType, this.provider.network),
+    );
+    this.hd = { ...this.hd, index };
+    return this;
   }
 
   /**
@@ -386,28 +564,29 @@ export class Account extends AlkanesAccount {
 
 /*
   The two chain links. Each wraps a promise that is created ONCE, so however
-  far down the chain you await — the built transaction, its txid, its
+  far down the chain you await — the built transaction, the Sent, its
   confirmation — the same build and the same broadcast are behind all of it.
 
   The inner value is boxed (`{ sent }`) on the way through `.then` because a
   SentTx is itself a thenable: returned bare, the promise machinery would
-  flatten it to a txid and the `waitForConfirmation` handle would be lost.
+  flatten it and the attached handles would be lost. The resolved `Sent` is a
+  plain class with no `.then`, so IT passes through promises unflattened.
 */
 function sentTx(inFlight: Promise<Sent>): SentTx {
-  const txid = inFlight.then((s) => s.txid);
-  return Object.assign(txid, {
-    waitForConfirmation: () => inFlight.then((s) => s.waitForConfirmation()),
-  });
+  return Object.assign(
+    inFlight.then((s) => s),
+    {
+      txid: inFlight.then((s) => s.txid),
+      waitForConfirmation: () => inFlight.then((s) => s.waitForConfirmation()),
+    },
+  );
 }
 
 function building(inFlight: Promise<BuiltTx>): BuildingTx {
   return Object.assign(inFlight, {
     send: (): SentTx => {
       const boxed = inFlight.then((built) => ({ sent: built.send() }));
-      const txid = boxed.then((b) => b.sent);
-      return Object.assign(txid, {
-        waitForConfirmation: () => boxed.then((b) => b.sent.waitForConfirmation()),
-      });
+      return sentTx(boxed.then((b) => b.sent));
     },
   });
 }
@@ -589,23 +768,58 @@ interface PendingInput {
   selector: number | "all";
 }
 
-/** What a broadcast answers internally: the txid, and how to wait it out. */
-interface Sent {
-  txid: string;
-  waitForConfirmation: () => Promise<void>;
+/** Whether a network is regtest — the faucet's precondition. */
+function isRegtest(network: bitcoin.Network): boolean {
+  return network.bech32 === "bcrt";
 }
 
 /**
- * A broadcast in flight. Await it for the txid, or keep chaining:
+ * A broadcast in flight. Await it for the `Sent` (txid + waiter), or keep
+ * chaining without awaiting at all:
  *
- *     const txid = await tx.build().send();
+ *     const { txid } = await tx.build().send();
  *     await tx.build().send().waitForConfirmation();
+ *     const txid = await tx.build().send().txid;
  *
- * One send either way — the chain just decides how far you wait.
+ * One send however it is held — the chain just decides how far you wait.
  */
-export type SentTx = Promise<string> & {
-  waitForConfirmation: () => Promise<void>;
+export type SentTx = Promise<Sent> & {
+  /** Just the txid, without holding the rest. */
+  txid: Promise<string>;
+  /** Wait it out; resolves to the transaction plus what its protostones did. */
+  waitForConfirmation: () => Promise<Confirmed>;
 };
+
+/**
+ * A faucet payout in flight. Await it for the `Sent` the faucet broadcast, or
+ * chain past it:
+ *
+ *     const { txid } = await alice.tx().requestFaucet();
+ *     const sent = await alice.tx().requestFaucet().waitForConfirmation();
+ *
+ * Whichever way it is held, ONE request goes to the faucet.
+ */
+export type FaucetRequest = Promise<Sent> & {
+  /** Just the payout's txid, without holding the rest. */
+  txid: Promise<string>;
+  /** Wait the payout out; resolves to it plus its traces (a payout runs none). */
+  waitForConfirmation: () => Promise<Confirmed>;
+};
+
+/** What to ask the faucet for. Everything is optional. */
+export interface FaucetOptions {
+  /** Defaults to the faucet's own. */
+  amount?: number;
+  /** `"rbtc"` (default) or `"diesel"`. */
+  asset?: EspoFaucetAsset;
+  /**
+   * Where the coins land. Defaults to the address that HOLDS that asset for
+   * this account: the payment address for rbtc, the asset address for an
+   * alkane like diesel. The two are the same address unless the account was
+   * built with separate ones.
+   */
+  to?: string;
+}
 
 /**
  * A build in flight. The chain ends wherever you stop awaiting it: the built
@@ -895,6 +1109,54 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
    * underfunded spend surfaces as a revert in the simulation, not at build:
    * the amounts a call returned exist nowhere else.
    */
+  /**
+   * Ask the regtest faucet to pay this account.
+   *
+   *     await alice.tx().requestFaucet();                        // just ask
+   *     await alice.tx().requestFaucet().waitForConfirmation();  // ask and wait
+   *     const { txid } = await alice.tx().requestFaucet({ amount: 0.5 });
+   *
+   * Not a transaction this wallet builds — the faucet builds and broadcasts
+   * it — so nothing else on the chain applies, and this ends it. What comes
+   * back is the same `Sent` a broadcast of your own gives, because from here
+   * on it is the same thing: a txid to watch.
+   *
+   * REGTEST ONLY. It throws anywhere else rather than asking, since a
+   * mainnet espo does not serve the method at all.
+   */
+  requestFaucet(options: FaucetOptions = {}): FaucetRequest {
+    const provider = this.account.provider;
+    if (!isRegtest(provider.network)) {
+      throw new Error(
+        "tx: requestFaucet is regtest-only — this account is on " +
+          `${provider.network.bech32 ?? "an unknown network"}, whose espo ` +
+          "serves no faucet",
+      );
+    }
+
+    const asset = options.asset ?? "rbtc";
+    const to =
+      options.to ??
+      (asset === "rbtc"
+        ? this.account.address()
+        : this.account.assetAddress());
+
+    const inFlight = (async () => {
+      const { txid } = consumeOrThrow(
+        await provider.rpc.espo.faucetRequest(to, options.amount, asset),
+      );
+      return new Sent(txid, provider);
+    })();
+
+    return Object.assign(
+      inFlight.then((s) => s),
+      {
+        txid: inFlight.then((s) => s.txid),
+        waitForConfirmation: () => inFlight.then((s) => s.waitForConfirmation()),
+      },
+    );
+  }
+
   spending(from: AlkaneTx<any, any>, selector: number | "all" = "all"): this {
     if ((from as unknown) === this) {
       throw new Error("tx: .spending() names itself");
@@ -1020,25 +1282,7 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
           const sent = await account.provider.rpc.electrum.esplora_broadcastTx(hex);
           if (isBoxedError(sent)) throw new Error(sent.message);
           const txid = sent.data;
-          const waitForConfirmation = async () => {
-            // mined…
-            let height = 0;
-            for (;;) {
-              const tx = await account.provider.rpc.electrum.esplora_gettransaction(txid);
-              if (!isBoxedError(tx) && tx.data.status?.confirmed) {
-                height = tx.data.status.block_height ?? 0;
-                break;
-              }
-              await sleep(2000);
-            }
-            // …and indexed, so a read after this sees what the transaction did
-            for (;;) {
-              const tip = await account.provider.rpc.espo.getTipHeight();
-              if (!isBoxedError(tip) && tip.data.height >= height) return;
-              await sleep(1000);
-            }
-          };
-          return { txid, waitForConfirmation };
+          return new Sent(txid, account.provider);
         };
         /*
           One send, two ways to hold it: the promise is created once here, so

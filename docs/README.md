@@ -16,10 +16,10 @@ entry is importable on its own and documented on its own page:
 | `alkanesjs/boxed`                        | result handling: `consumeOrThrow`, `isBoxedError`, …  | [boxed.md](./boxed.md)           |
 | `alkanesjs/traces`                       | decoding what protostones did                         | [traces.md](./traces.md)         |
 | `alkanesjs/abi`                          | alkabi documents: overrides, local wasm views         | [abi.md](./abi.md)               |
+| `alkanesjs/abis`                         | shipped ABI documents: Oyl AMM, frBTC, plain tokens   | [abis.md](./abis.md)             |
 | `alkanesjs/utils/amm`                    | constant-product pool math (pure bigint)              | [utils-amm.md](./utils-amm.md)   |
 | `alkanesjs/utils/frbtc`                  | frBTC premium math + live signer lookup               | [utils-frbtc.md](./utils-frbtc.md) |
 | `alkanesjs/wallets`                      | browser wallet connectors (SSR-safe, no bitcoinjs)    | —                                |
-| `alkanesjs/debug`                        | wire-level request logging                            | —                                |
 
 Two pages cut across the entries:
 
@@ -36,11 +36,13 @@ The structure follows three rules, and additions should too:
 1. **The root is the 90% path.** A script that deploys a contract, calls it,
    and checks a balance imports from `alkanesjs` and nothing else. Anything
    not on that path lives in an entry named after its purpose.
-2. **alkanesjs defines no contracts.** No ids, no ABIs, no opcode tables for
-   specific deployments — you bring the ABI document, the SDK brings the
-   machinery. Where a specific contract imposes knowledge an ABI cannot carry
-   (frBTC's premium arithmetic, its signer lookup), that knowledge lives under
-   `alkanesjs/utils/<name>` as plain functions.
+2. **alkanesjs binds no contracts.** No hardcoded ids, no opcode tables in
+   code — you say which deployment you talk to, the SDK brings the machinery.
+   ABI *documents* for widely-deployed contracts do ship, as data, under
+   `alkanesjs/abis` — generated files carrying no ids. Where a specific
+   contract imposes knowledge an ABI cannot carry (frBTC's premium
+   arithmetic, its signer lookup), that lives under `alkanesjs/utils/<name>`
+   as plain functions.
 3. **Entries share types structurally, never nominally.** Each entry bundles
    its own type graph, so an entry must not name core *classes* (`Provider`,
    `Account`, `Contract`) in its public signatures — two flattened copies of a
@@ -52,16 +54,10 @@ The structure follows three rules, and additions should too:
 ## Quick orientation
 
 ```ts
-import { Account, AlkaneId, Contract, Provider, bitcoin } from "alkanesjs";
+import { Account, AlkaneId, Contract, networks } from "alkanesjs";
 import { consumeOrThrow } from "alkanesjs/boxed";
 
-const provider = new Provider({
-  metashrewUrl: "https://kirby.alkanode.com/rpc",
-  espoUrl: "https://api.alkanode.com/rpc",
-  network: bitcoin.networks.bitcoin,
-  explorerUrl: "https://mempool.space",
-  defaultFeeRate: 3,
-});
+const provider = networks.Mainnet;   // predefined; networks.Regtest too
 
 const me = Account.fromWIF(WIF, provider);
 const token = new Contract(MyTokenAbi, AlkaneId.fromString("2:123"), provider);

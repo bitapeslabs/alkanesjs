@@ -18,10 +18,10 @@ const flatten = (input, output = input) => ({
 export default [
   flatten("index"),
   flatten("wallets"),
+  flatten("abis/index", "abis"),
   flatten("boxed"),
   flatten("traces"),
   flatten("abi"),
-  flatten("debug"),
   flatten("utils/amm", "utils-amm"),
   flatten("utils/frbtc", "utils-frbtc"),
 ];

@@ -1,0 +1,9 @@
+{
+  "name": "alkanesjs-abis",
+  "private": true,
+  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/abis",
+  "main": "../dist/abis.js",
+  "module": "../dist/abis.mjs",
+  "browser": "../dist/abis.mjs",
+  "types": "../dist/abis.d.ts"
+}

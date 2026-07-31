@@ -1,9 +1,0 @@
-{
-  "name": "alkanesjs-debug",
-  "private": true,
-  "description": "Stub so classic (non-exports-aware) module resolution finds alkanesjs/debug",
-  "main": "../dist/debug.js",
-  "module": "../dist/debug.mjs",
-  "browser": "../dist/debug.mjs",
-  "types": "../dist/debug.d.ts"
-}

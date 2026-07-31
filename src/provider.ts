@@ -13,13 +13,15 @@ import {
   type AlkaneTx,
   type BlockResults,
 } from "@/libs/alkanes/account";
+import { Confirmed, tracesOf } from "@/libs/alkanes/confirm";
 
 /**
  * A package in flight. Await it for the txids, in the order given, or chain
  * `waitForConfirmation()` to wait the whole package out.
  */
 export type SentPackage = Promise<string[]> & {
-  waitForConfirmation: () => Promise<void>;
+  /** Wait the package out; resolves to one `Confirmed` per transaction, in order. */
+  waitForConfirmation: () => Promise<Confirmed[]>;
 };
 import {
   decodeSimulateBlockResponse,
@@ -55,7 +57,6 @@ import { setFetchDebug } from "./debug";
 
 interface ProviderConfigBase {
   network: BitcoinNetwork;
-  explorerUrl: string;
   defaultFeeRate?: number;
   btcTicker?: string;
   pacerSettings?: PacerSettings;
@@ -98,7 +99,6 @@ export class Provider {
   readonly metashrewUrl: string;
   readonly espoUrl?: string;
   readonly network: BitcoinNetwork;
-  readonly explorerUrl: string;
   readonly pacerSettings: PacerSettings = {
     intervalMs: 1000,
     maxPerInterval: 10,
@@ -115,7 +115,6 @@ export class Provider {
     this.metashrewUrl = config.metashrewUrl;
     this.espoUrl = config.espoUrl;
     this.network = config.network;
-    this.explorerUrl = config.explorerUrl.replace(/\/+$/, "");
     this.btcTicker = config.btcTicker ?? "BTC";
     this.pacerSettings = config.pacerSettings ?? this.pacerSettings;
     this.defaultFeeRate = config.defaultFeeRate ?? 5;
@@ -133,13 +132,6 @@ export class Provider {
    */
   setDebug(level: number): void {
     setFetchDebug(level);
-  }
-
-  protected txUrl(txid: string): string {
-    return `${this.explorerUrl}/tx/${txid}`;
-  }
-  protected addressUrl(address: string): string {
-    return `${this.explorerUrl}/address/${address}`;
   }
 
   buildRpcCall<T>(method: string, params: unknown[] = []): RpcCall<T> {
@@ -201,7 +193,8 @@ export class Provider {
    * before the children that spend them, which is the order given.
    *
    * Waiting resolves once the LAST transaction is mined and espo has indexed
-   * its block — a package is mined together, so that is the whole run.
+   * its block — a package is mined together, so that is the whole run — and
+   * answers with one `Confirmed` per transaction, traces included.
    */
   sendPackage(
     txs: readonly AlkaneTx<any, any>[],
@@ -220,7 +213,7 @@ export class Provider {
     })();
 
     return Object.assign(inFlight, {
-      waitForConfirmation: async (): Promise<void> => {
+      waitForConfirmation: async (): Promise<Confirmed[]> => {
         const txids = await inFlight;
         const last = txids[txids.length - 1];
         // mined…
@@ -236,9 +229,15 @@ export class Provider {
         // …and indexed, so a read after this sees what the package did
         for (;;) {
           const tip = await this.rpc.espo.getTipHeight();
-          if (!isBoxedError(tip) && tip.data.height >= height) return;
+          if (!isBoxedError(tip) && tip.data.height >= height) break;
           await sleep(1000);
         }
+        // a package mines together, so every transaction is readable now
+        return Promise.all(
+          txids.map(async (txid) =>
+            new Confirmed(txid, this, await tracesOf(this, txid)),
+          ),
+        );
       },
     });
   }

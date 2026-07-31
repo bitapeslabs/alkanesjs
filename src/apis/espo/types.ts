@@ -636,6 +636,39 @@ export type DeepExpand<T> = T extends Primitive
   as long as the package rate clears it. The result is Core's own answer,
   passed through.
 */
+/*
+  The regtest faucet, served over RPC as `btc.faucet_request` /
+  `btc.faucet_status`. Both exist ONLY on a regtest espo with a faucet
+  configured — anywhere else they are not methods at all, and the node
+  answers `Method not found`.
+*/
+
+/** What `btc.faucet_request` answers: the payout transaction. */
+export interface EspoFaucetRequestResult {
+  txid: string;
+  [k: string]: unknown;
+}
+
+/** One asset's availability and limits, as the faucet reports them. */
+export interface EspoFaucetAssetStatus {
+  enabled: boolean;
+  min_amount: number;
+  max_amount: number;
+  total_available: number;
+  max_per_ip_per_day: number;
+  [k: string]: unknown;
+}
+
+/** What `btc.faucet_status` answers: one entry per asset it serves. */
+export interface EspoFaucetStatusResult {
+  rbtc?: EspoFaucetAssetStatus;
+  diesel?: EspoFaucetAssetStatus;
+  [asset: string]: EspoFaucetAssetStatus | undefined;
+}
+
+/** Which asset to ask the faucet for. */
+export type EspoFaucetAsset = "rbtc" | "diesel";
+
 export interface EspoSubmitPackageTxResult {
   txid: string;
   error?: string;

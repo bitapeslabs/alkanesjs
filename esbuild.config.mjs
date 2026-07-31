@@ -34,10 +34,10 @@ const wantBrowser = args.includes("--browser") || !args.includes("--node");
  | rollup.config.mjs, which lists the same rows).                |
  *──────────────────────────────────────────────────────────────*/
 const ENTRIES = [
+  { src: "src/abis/index.ts", out: "abis" },
   { src: "src/boxed.ts", out: "boxed" },
   { src: "src/traces.ts", out: "traces" },
   { src: "src/abi.ts", out: "abi" },
-  { src: "src/debug.ts", out: "debug" },
   { src: "src/utils/amm.ts", out: "utils-amm" },
   { src: "src/utils/frbtc.ts", out: "utils-frbtc" },
 ];

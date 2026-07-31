@@ -38,6 +38,21 @@ export { bitcoin };
 /* the provider — endpoints, simulation, packages */
 export * from "./provider";
 
+/* predefined providers for the hosted infrastructure */
+export { networks, type NetworkProvider } from "./networks";
+
+/*
+  Wire-level logging. These live on the ROOT and not in an entry of their own
+  on purpose: the logger is one piece of module state wrapping one fetch, and
+  a separate entry would bundle a SECOND copy of it — controls that quietly
+  governed nothing. `provider.setDebug(n)` is the same switch.
+*/
+export {
+  setFetchDebug,
+  isFetchDebugEnabled,
+  fetchDebugLevel,
+} from "./debug";
+
 /* accounts and the transaction builder */
 export * from "./libs/alkanes/account";
 
