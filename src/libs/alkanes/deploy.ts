@@ -53,7 +53,7 @@ import {
 
 import { AlkaneId, type FormattedUtxo } from "@/apis";
 import { consumeOrThrow, isBoxedError } from "@/boxed";
-import { tracesOf, type ConfirmedTrace } from "./confirm";
+import { awaitConfirmed, tracesOf, type ConfirmedTrace } from "./confirm";
 import { sleep } from "@/utils";
 import type { AlkabiDocument } from "../alkabi/types";
 import { Contract } from "../alkabi/contract";
@@ -242,19 +242,17 @@ export class DeploymentPackage {
     const revealTxid = this.revealTx.txid;
 
     const waitForDeployment = async (): Promise<DeployedAlkane> => {
-      // mined…
-      consumeOrThrow(await provider.waitForConfirmation(revealTxid));
+      /*
+        Mined, and espo caught up so reads after this see the contract.
 
-      // …espo caught up, so reads after this see the contract…
-      const tx = consumeOrThrow(
-        await provider.rpc.electrum.esplora_gettransaction(revealTxid),
-      );
-      const height = tx.status?.block_height ?? 0;
-      for (;;) {
-        const tip = await provider.rpc.espo.getTipHeight();
-        if (!isBoxedError(tip) && tip.data.height >= height) break;
-        await sleep(1000);
-      }
+        Deliberately the same waiter every other path uses: it treats a
+        lookup that finds nothing as "not yet" and keeps polling, because a
+        transaction sitting in the mempool reads exactly like one that does
+        not exist. A waiter that gave up on not-found would fail whenever a
+        block took longer than its patience — which, for the slowest thing
+        the SDK does, is most of the time.
+      */
+      await awaitConfirmed(provider, revealTxid);
 
       /*
         …and the reveal's own trace names the id the runtime assigned, in its

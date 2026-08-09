@@ -1081,7 +1081,11 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
    * `.transfer()` takes.
    */
   transfers(
-    list: readonly (readonly [AlkaneId, bigint, AlkanesAccount | string | number])[],
+    list: readonly (readonly [
+      AlkaneIdData,
+      AmountLike,
+      AlkanesAccount | string | number,
+    ])[],
   ): Omit<this, "call" | "protostone" | "transfer" | "transfers" | "spending"> {
     for (const [asset, amount, to] of list) {
       this.transfer(asset, amount, to as never);
