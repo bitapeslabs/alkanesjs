@@ -1544,9 +1544,16 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
             !context.spent.has(`${utxo.txId}:${utxo.outputIndex}`),
         ),
       },
-      // a chained input whose contents nobody stated can't be accounted for,
-      // so for that case alone the alkane checks have to stand down
-      ignoreAlkanesUtxoCheck: blind,
+      /*
+        A chained input whose contents nobody stated can't be accounted for,
+        so the SUFFICIENCY check has to stand down — the blind input may well
+        cover the shortfall. Selection itself must NOT stand down: a transfer
+        of an asset the parent never touched (say, pairing a confirmed token
+        with chained frBTC in one pool-create) still needs its confirmed
+        UTXOs pulled in, or the edict ships with no input carrying the tokens
+        and the call reverts on-chain with "balance underflow".
+      */
+      ignoreAlkanesUtxoCheck: false,
       ignoreAlkanesRequirementCheck: blind,
       ...(protostones.length > 0 ? { protostones } : {}),
     } as ConstructorParameters<typeof ProtostoneTransaction>[1];

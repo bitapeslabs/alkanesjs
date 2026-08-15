@@ -846,12 +846,16 @@ export class ProtostoneTransaction {
   //This function gets the txids of all the utxos that are needed to meet the alkanes requirement
   private getAlkanesUtxosToMeetAlkanesRequirement(): Set<FormattedUtxo> {
     const alkanesUtxos: Set<FormattedUtxo> = new Set();
-    if (
-      this.transactionOptions.overrideInputs ||
-      this.transactionOptions.ignoreAlkanesRequirementCheck
-    ) {
+    if (this.transactionOptions.overrideInputs) {
       return alkanesUtxos;
     }
+    /*
+      With ignoreAlkanesRequirementCheck the requirement is best-effort: forced
+      inputs may carry alkanes only the runtime can see (a chained parent's
+      call results), so selection still gathers what the confirmed set offers
+      but a shortfall is not an error.
+    */
+    const bestEffort = this.transactionOptions.ignoreAlkanesRequirementCheck;
 
     for (const alkanes of Object.keys(this.cumulativeSpendRequirementAlkanes)) {
       /*
@@ -910,7 +914,10 @@ export class ProtostoneTransaction {
         alkanesUtxos.add(utxo);
       }
 
-      if (accumulated < this.cumulativeSpendRequirementAlkanes[alkanes]) {
+      if (
+        accumulated < this.cumulativeSpendRequirementAlkanes[alkanes] &&
+        !bestEffort
+      ) {
         throw new Error(
           `Insufficient Alkanes UTXOs to meet the requirement for ${alkanes}.`,
         );
