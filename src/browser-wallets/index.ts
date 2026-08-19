@@ -609,7 +609,9 @@ export class WalletConnector {
         account = {
           address,
           publicKey,
-          addressType: 'p2tr',
+          // espo accounts default to p2wpkh but support several types —
+          // don't claim one here, the address encodes it
+          addressType: 'unknown',
         };
         break;
       }
