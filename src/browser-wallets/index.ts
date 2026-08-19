@@ -54,6 +54,11 @@ export interface WalletAccount {
  */
 export interface PsbtSigningOptions {
   autoFinalized?: boolean;
+  /**
+   * What this psbt is for (eg a contract-deploy commit) — forwarded to
+   * wallets whose approval UI can display it (espo).
+   */
+  context?: { kind?: string; wasmBytes?: number };
   toSignInputs?: Array<{
     index: number;
     address?: string;

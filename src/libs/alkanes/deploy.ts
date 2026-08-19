@@ -510,8 +510,13 @@ export class AlkaneDeployment {
       childFee = next;
     }
 
-    /* commit: signed by the account, like any of its transactions */
-    const signedCommit = await account.sign(commitBuild.psbtBase64);
+    /* commit: signed by the account, like any of its transactions. The
+       context tells wallet approval UIs this bare-looking payment is a
+       contract-deploy commit. */
+    const signedCommit = await account.sign(commitBuild.psbtBase64, {
+      kind: "deploy-commit",
+      wasmBytes: this.wasm.length,
+    });
     const commitTx = Psbt.fromBase64(signedCommit, {
       network,
     }).extractTransaction();

@@ -297,6 +297,17 @@ export class ViewAccount extends AlkanesAccount {
  * (a browser wallet) it defers to. Its transactions are finalized with real
  * signatures, which is what makes them broadcastable.
  */
+/**
+ * What a psbt handed to an external signer is FOR. Wallets surface this in
+ * their approval UI (eg espo's sign screen shows a "Deploy:" summary for a
+ * contract-upload commit, which is otherwise an unreadable bare payment).
+ */
+export type PsbtSignContext = {
+  kind: "deploy-commit";
+  /** Raw (uncompressed) contract size in bytes. */
+  wasmBytes?: number;
+};
+
 export class Account extends AlkanesAccount {
   /** Reassigned by `setIndex` on an HD account; fixed otherwise. */
   private keypair?: ReturnType<typeof EcPair.fromWIF>;
@@ -307,7 +318,10 @@ export class Account extends AlkanesAccount {
     provider: Provider,
     addresses: TransactionAddressInput,
     keypair?: ReturnType<typeof EcPair.fromWIF>,
-    private readonly externalSigner?: (unsigned: string) => Promise<string>,
+    private readonly externalSigner?: (
+      unsigned: string,
+      context?: PsbtSignContext,
+    ) => Promise<string>,
     feeRate?: number,
     hd?: HdWallet,
   ) {
@@ -403,7 +417,7 @@ export class Account extends AlkanesAccount {
    * the address cannot be derived and has to be given.
    */
   static fromSignPsbt(
-    signPsbt: (unsigned: string) => Promise<string>,
+    signPsbt: (unsigned: string, context?: PsbtSignContext) => Promise<string>,
     address: TransactionAddressInput,
     provider: Provider,
     options: AccountOptions = {},
@@ -542,9 +556,12 @@ export class Account extends AlkanesAccount {
     return new AlkaneDeployment(this, wasm, options);
   }
 
-  async sign(unsignedBase64: string): Promise<string> {
+  async sign(
+    unsignedBase64: string,
+    context?: PsbtSignContext,
+  ): Promise<string> {
     if (this.externalSigner) {
-      return this.externalSigner(unsignedBase64);
+      return this.externalSigner(unsignedBase64, context);
     }
     const psbt = bitcoin.Psbt.fromBase64(unsignedBase64, {
       network: this.provider.network,
