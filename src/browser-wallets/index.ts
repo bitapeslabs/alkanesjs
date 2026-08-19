@@ -67,6 +67,22 @@ export interface PsbtSigningOptions {
  */
 export const BROWSER_WALLETS: BrowserWalletInfo[] = [
   {
+    // ESPO — the espo-wallet extension (apps/espo-wallet in the pizzafun
+    // monorepo). Injects `window.espo` (EspoProvider): connect() -> address,
+    // getPublicKey / getNetwork ("mainnet" | "regtest") / signPsbt(BASE64,
+    // options) — note base64, not hex — routed through the extension's
+    // approval popup, and signMessage(text). Single taproot address.
+    id: 'espo',
+    name: 'Espo Wallet',
+    icon: WALLET_ICONS.espo,
+    website: 'https://espo.sh',
+    injectionKey: 'espo',
+    supportsPsbt: true,
+    supportsTaproot: true,
+    supportsOrdinals: true,
+    mobileSupport: false,
+  },
+  {
     // SUBFROST chrome/firefox extension. Injects `window.subfrost` matching
     // BrowserWalletInfo's contract (requestAccounts / getAccounts /
     // getPublicKey / getNetwork / signPsbt / signMessage). Source extension:
@@ -238,6 +254,12 @@ export function isWalletInstalled(wallet: BrowserWalletInfo): boolean {
 
     // Special detection for wallets with non-standard injection
     switch (wallet.id) {
+      case 'espo':
+        // espo-wallet defines window.espo via Object.defineProperty (a frozen
+        // Proxy). Shape-check for signPsbt instead of trusting mere presence.
+        return typeof win.espo === 'object'
+          && win.espo !== null
+          && typeof win.espo.signPsbt === 'function';
       case 'subfrost':
         // SUBFROST extension defines window.subfrost as a frozen object via
         // Object.defineProperty. Verify the object has the requestAccounts
@@ -340,6 +362,9 @@ export class ConnectedWallet {
    */
   async signMessage(message: string): Promise<string> {
     switch (this.info.id) {
+      case 'espo':
+        // window.espo.signMessage(text)
+        return await this.provider.signMessage(message);
       case 'subfrost':
         // SUBFROST window.subfrost.signMessage(message, address)
         return await this.provider.signMessage(message, this.account.address);
@@ -404,6 +429,16 @@ export class ConnectedWallet {
     }
 
     switch (this.info.id) {
+      case 'espo': {
+        // window.espo.signPsbt takes and returns BASE64. Accept either
+        // encoding here and hand espo what it expects; espo honors
+        // options.autoFinalized (defaulting to finalized).
+        const base64 = isHex(psbtHex) ? hexToBase64(psbtHex) : psbtHex;
+        return await this.provider.signPsbt(base64, {
+          ...options,
+          autoFinalized: options?.autoFinalized ?? true,
+        });
+      }
       case 'subfrost':
         // SUBFROST window.subfrost.signPsbt(psbtHex, options)
         return await this.provider.signPsbt(psbtHex, options);
@@ -475,6 +510,7 @@ export class ConnectedWallet {
   async getNetwork(): Promise<string> {
     try {
       switch (this.info.id) {
+        case 'espo': // "mainnet" | "regtest"
         case 'unisat':
         case 'wizz':
           return await this.provider.getNetwork();
@@ -565,6 +601,18 @@ export class WalletConnector {
     let account: WalletAccount;
 
     switch (wallet.id) {
+      case 'espo': {
+        // window.espo.connect() resolves the active address (and opens the
+        // extension's connect approval on first use for this origin).
+        const address = await provider.connect();
+        const publicKey = await provider.getPublicKey();
+        account = {
+          address,
+          publicKey,
+          addressType: 'p2tr',
+        };
+        break;
+      }
       case 'subfrost':
       case 'unisat':
       case 'wizz': {
@@ -754,6 +802,18 @@ export class WalletConnector {
 }
 
 // Utility functions
+function isHex(s: string): boolean {
+  return /^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0;
+}
+
+/** hex -> base64 without bitcoinjs (this entrypoint must stay dependency-free). */
+function hexToBase64(hex: string): string {
+  const bytes = hexToBytes(hex);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
 function hexToBytes(hex: string): Uint8Array {
   const cleanHex = hex.startsWith('0x') ? hex.slice(2) : hex;
   const bytes = new Uint8Array(cleanHex.length / 2);
