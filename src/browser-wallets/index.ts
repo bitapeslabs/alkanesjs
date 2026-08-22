@@ -510,6 +510,26 @@ export class ConnectedWallet {
   }
 
   /**
+   * Sign SEVERAL psbts in one wallet interaction where the wallet supports
+   * it (espo's multiPsbtSign shows one paginated approval); other wallets
+   * fall back to sequential signPsbt calls (one popup each).
+   */
+  async signPsbts(psbts: string[], options?: PsbtSigningOptions): Promise<string[]> {
+    if (this.info.id === 'espo' && psbts.length > 1) {
+      const items = psbts.map((p) => ({
+        psbtBase64: isHex(p) ? hexToBase64(p) : p,
+        options: { ...options, autoFinalized: options?.autoFinalized ?? true },
+      }));
+      return await this.provider.multiPsbtSign(items);
+    }
+    const out: string[] = [];
+    for (const p of psbts) {
+      out.push(await this.signPsbt(p, options));
+    }
+    return out;
+  }
+
+  /**
    * Get current network
    */
   async getNetwork(): Promise<string> {

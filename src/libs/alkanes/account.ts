@@ -625,6 +625,14 @@ export interface TxBuildOptions {
    * package as a whole lands on this number.
    */
   feeRate?: number;
+  /**
+   * Build fully (real inputs, real fee, dummy witnesses) but DON'T ask the
+   * signer yet. The BuiltTx keeps `signed: false` and its unsigned
+   * `psbtBase64`; segwit txids ignore witnesses, so chained children can
+   * reference it before the signatures exist. `buildChain`'s signBatch mode
+   * uses this to collect every psbt for ONE wallet approval.
+   */
+  deferSign?: boolean;
 }
 
 /** An amount of one alkane. */
@@ -1268,7 +1276,7 @@ export class AlkaneTx<Out = Uint8Array, Slot = TxOutcome> {
     let transaction: bitcoin.Transaction;
     let signed = false;
 
-    if (this.account.canSign) {
+    if (this.account.canSign && !options?.deferSign) {
       const signedPsbt = await this.account.sign(unsigned);
       transaction = bitcoin.Psbt.fromBase64(signedPsbt, {
         network: this.account.provider.network,
@@ -1719,6 +1727,18 @@ function changeOutputs(
 export async function buildChain(
   provider: Provider,
   txs: readonly AlkaneTx<any, any>[],
+  options?: {
+    /**
+     * Sign the WHOLE chain in one wallet interaction: every transaction is
+     * built with deferred signatures (valid txids — segwit txids ignore
+     * witnesses), then all unsigned psbts (base64) go to this callback at
+     * once (espo's multiPsbtSign shows them as one paginated approval), and
+     * the finalized psbts it returns replace the dummy witnesses. The
+     * signer MUST NOT change inputs/outputs: a txid mismatch throws, since
+     * later transactions in the chain already reference the built ids.
+     */
+    signBatch?: (unsignedPsbtsBase64: string[]) => Promise<string[]>;
+  },
 ): Promise<BuiltTx[]> {
   const built: BuiltTx[] = [];
   const context: BlockContext = {
@@ -1726,14 +1746,43 @@ export async function buildChain(
     available: [],
     spendable: new Map(),
   };
+  const buildOptions = options?.signBatch ? { deferSign: true } : undefined;
   for (const tx of txs) {
-    const one = await tx.build(undefined, context);
+    const one = await tx.build(buildOptions, context);
     for (const input of one.transaction.ins) {
       const txid = Buffer.from(input.hash).reverse().toString("hex");
       context.spent.add(`${txid}:${input.index}`);
     }
     context.available.push(...changeOutputs(one, tx.account, provider.network));
     built.push(one);
+  }
+
+  if (options?.signBatch) {
+    const toSign = built.filter((b) => !b.signed);
+    if (toSign.length > 0) {
+      const signedPsbts = await options.signBatch(
+        toSign.map((b) => b.psbtBase64),
+      );
+      if (signedPsbts.length !== toSign.length) {
+        throw new Error(
+          `buildChain: signBatch returned ${signedPsbts.length} psbts for ${toSign.length} transactions`,
+        );
+      }
+      toSign.forEach((b, i) => {
+        const transaction = bitcoin.Psbt.fromBase64(signedPsbts[i], {
+          network: provider.network,
+        }).extractTransaction();
+        if (transaction.getId() !== b.txid) {
+          throw new Error(
+            `buildChain: signed tx ${transaction.getId()} does not match built ` +
+              `txid ${b.txid} — the signer altered the transaction`,
+          );
+        }
+        b.transaction = transaction;
+        b.hex = transaction.toHex();
+        b.signed = true;
+      });
+    }
   }
   return built;
 }
